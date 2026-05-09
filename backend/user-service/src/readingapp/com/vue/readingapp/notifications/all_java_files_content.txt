@@ -1,0 +1,4776 @@
+--- 开始文件: ClearAllNotifications.java ---
+package com.vue.readingapp.notifications;
+
+import org.springframework.web.bind.annotation.*;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.beans.factory.annotation.Autowired;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.*;
+
+@RestController
+@RequestMapping("/api/v1/notifications")
+public class ClearAllNotifications {
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    // 打印接收到的请求
+    private void printRequest(Object request) {
+        System.out.println("=== 收到清除所有通知请求 ===");
+        System.out.println("请求数据: " + request);
+        System.out.println("=========================");
+    }
+
+    // 打印查询结果
+    private void printQueryResult(Object result) {
+        System.out.println("=== 数据库查询结果 ===");
+        System.out.println("查询结果: " + result);
+        System.out.println("===================");
+    }
+
+    // 打印返回数据
+    private void printResponse(Object response) {
+        System.out.println("=== 准备返回的响应 ===");
+        System.out.println("响应数据: " + response);
+        System.out.println("===================");
+    }
+
+    // 响应DTO
+    public static class ClearAllNotificationsResponse {
+        private boolean success;
+        private String message;
+        private int clearedCount;
+        private String timestamp;
+
+        public ClearAllNotificationsResponse(boolean success, String message, int clearedCount, String timestamp) {
+            this.success = success;
+            this.message = message;
+            this.clearedCount = clearedCount;
+            this.timestamp = timestamp;
+        }
+
+        public boolean isSuccess() { return success; }
+        public void setSuccess(boolean success) { this.success = success; }
+
+        public String getMessage() { return message; }
+        public void setMessage(String message) { this.message = message; }
+
+        public int getClearedCount() { return clearedCount; }
+        public void setClearedCount(int clearedCount) { this.clearedCount = clearedCount; }
+
+        public String getTimestamp() { return timestamp; }
+        public void setTimestamp(String timestamp) { this.timestamp = timestamp; }
+    }
+
+    @DeleteMapping("/clear-all")
+    public ResponseEntity<ClearAllNotificationsResponse> clearAllNotifications(
+            @RequestHeader(value = "Authorization", required = false) String authHeader) {
+
+        try {
+            // 打印接收到的请求
+            printRequest("清除所有通知");
+
+            // 1. 验证认证信息
+            if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new ClearAllNotificationsResponse(false, "请先登录", 0, null)
+                );
+            }
+
+            String token = authHeader.substring(7);
+
+            // 2. 根据token获取用户ID
+            String getUserSql = "SELECT user_id FROM user_sessions WHERE access_token = ? AND expires_at > NOW()";
+            List<Map<String, Object>> sessions = jdbcTemplate.queryForList(getUserSql, token);
+
+            if (sessions.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new ClearAllNotificationsResponse(false, "登录已过期，请重新登录", 0, null)
+                );
+            }
+
+            Map<String, Object> session = sessions.get(0);
+            Integer userId = (Integer) session.get("user_id");
+
+            // 3. 查询要删除的通知总数
+            String countSql = "SELECT COUNT(*) as total_count FROM notifications WHERE user_id = ?";
+            Map<String, Object> countResult = jdbcTemplate.queryForMap(countSql, userId);
+            long totalCount = ((Number) countResult.get("total_count")).longValue();
+
+            printQueryResult("要删除的通知总数: " + totalCount);
+
+            if (totalCount == 0) {
+                return ResponseEntity.ok(
+                        new ClearAllNotificationsResponse(true, "没有通知可清除", 0, null)
+                );
+            }
+
+            // 4. 删除所有通知
+            String deleteSql = "DELETE FROM notifications WHERE user_id = ?";
+            int deletedRows = jdbcTemplate.update(deleteSql, userId);
+
+            printQueryResult("删除行数: " + deletedRows);
+
+            if (deletedRows > 0) {
+                LocalDateTime now = LocalDateTime.now();
+                DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss");
+                String formattedNow = now.format(formatter) + "Z";
+
+                ClearAllNotificationsResponse response = new ClearAllNotificationsResponse(
+                        true,
+                        "所有通知已清除",
+                        deletedRows,
+                        formattedNow
+                );
+
+                // 打印返回数据
+                printResponse(response);
+
+                return ResponseEntity.ok(response);
+            } else {
+                return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                        new ClearAllNotificationsResponse(false, "清除通知失败", 0, null)
+                );
+            }
+
+        } catch (Exception e) {
+            System.err.println("清除所有通知过程中发生错误: " + e.getMessage());
+            e.printStackTrace();
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                    new ClearAllNotificationsResponse(false, "服务器内部错误: " + e.getMessage(), 0, null)
+            );
+        }
+    }
+}
+--- 结束文件: ClearAllNotifications.java ---
+
+--- 开始文件: MarkAllAsRead.java ---
+package com.vue.readingapp.notifications;
+
+import org.springframework.web.bind.annotation.*;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.beans.factory.annotation.Autowired;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.*;
+
+@RestController
+@RequestMapping("/api/v1/notifications")
+public class MarkAllAsRead {
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    // 打印接收到的请求
+    private void printRequest(Object request) {
+        System.out.println("=== 收到标记所有通知为已读请求 (MarkAllAsRead) ===");
+        System.out.println("请求数据: " + request);
+        System.out.println("==============================================");
+    }
+
+    // 打印查询结果
+    private void printQueryResult(Object result) {
+        System.out.println("=== 数据库查询结果 ===");
+        System.out.println("查询结果: " + result);
+        System.out.println("===================");
+    }
+
+    // 打印返回数据
+    private void printResponse(Object response) {
+        System.out.println("=== 准备返回的响应 ===");
+        System.out.println("响应数据: " + response);
+        System.out.println("===================");
+    }
+
+    // 响应DTO
+    public static class MarkAllAsReadResponse {
+        private boolean success;
+        private String message;
+        private int markedCount;
+        private String timestamp;
+
+        public MarkAllAsReadResponse(boolean success, String message, int markedCount, String timestamp) {
+            this.success = success;
+            this.message = message;
+            this.markedCount = markedCount;
+            this.timestamp = timestamp;
+        }
+
+        public boolean isSuccess() { return success; }
+        public void setSuccess(boolean success) { this.success = success; }
+
+        public String getMessage() { return message; }
+        public void setMessage(String message) { this.message = message; }
+
+        public int getMarkedCount() { return markedCount; }
+        public void setMarkedCount(int markedCount) { this.markedCount = markedCount; }
+
+        public String getTimestamp() { return timestamp; }
+        public void setTimestamp(String timestamp) { this.timestamp = timestamp; }
+    }
+
+    @PutMapping("/mark-all-as-read")
+    public ResponseEntity<MarkAllAsReadResponse> markAllAsRead(
+            @RequestHeader(value = "Authorization", required = false) String authHeader) {
+
+        try {
+            // 打印接收到的请求
+            printRequest("标记所有通知为已读");
+
+            // 1. 验证认证信息
+            if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new MarkAllAsReadResponse(false, "请先登录", 0, null)
+                );
+            }
+
+            String token = authHeader.substring(7);
+
+            // 2. 根据token获取用户ID
+            String getUserSql = "SELECT user_id FROM user_sessions WHERE access_token = ? AND expires_at > NOW()";
+            List<Map<String, Object>> sessions = jdbcTemplate.queryForList(getUserSql, token);
+
+            if (sessions.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new MarkAllAsReadResponse(false, "登录已过期，请重新登录", 0, null)
+                );
+            }
+
+            Map<String, Object> session = sessions.get(0);
+            Integer userId = (Integer) session.get("user_id");
+
+            // 3. 查询当前用户有多少未读通知
+            String countUnreadSql = "SELECT COUNT(*) as unread_count FROM notifications WHERE user_id = ? AND is_read = false";
+            Map<String, Object> countResult = jdbcTemplate.queryForMap(countUnreadSql, userId);
+            long unreadCount = ((Number) countResult.get("unread_count")).longValue();
+
+            printQueryResult("未读通知数量: " + unreadCount);
+
+            if (unreadCount == 0) {
+                return ResponseEntity.ok(
+                        new MarkAllAsReadResponse(true, "没有未读通知", 0, null)
+                );
+            }
+
+            // 4. 更新所有未读通知为已读状态
+            LocalDateTime now = LocalDateTime.now();
+            DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss");
+            String formattedNow = now.format(formatter) + "Z";
+
+            String updateSql = "UPDATE notifications SET is_read = true, read_at = ? WHERE user_id = ? AND is_read = false";
+            int updatedRows = jdbcTemplate.update(updateSql, now, userId);
+
+            printQueryResult("更新行数: " + updatedRows);
+
+            if (updatedRows > 0) {
+                MarkAllAsReadResponse response = new MarkAllAsReadResponse(
+                        true,
+                        "所有通知已标记为已读",
+                        updatedRows,
+                        formattedNow
+                );
+
+                // 打印返回数据
+                printResponse(response);
+
+                return ResponseEntity.ok(response);
+            } else {
+                return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                        new MarkAllAsReadResponse(false, "更新通知状态失败", 0, null)
+                );
+            }
+
+        } catch (Exception e) {
+            System.err.println("标记所有通知为已读过程中发生错误: " + e.getMessage());
+            e.printStackTrace();
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                    new MarkAllAsReadResponse(false, "服务器内部错误: " + e.getMessage(), 0, null)
+            );
+        }
+    }
+}
+--- 结束文件: MarkAllAsRead.java ---
+
+--- 开始文件: MarkAsRead.java ---
+package com.vue.readingapp.notifications;
+
+import org.springframework.web.bind.annotation.*;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.beans.factory.annotation.Autowired;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.*;
+
+@RestController
+@RequestMapping("/api/v1/notifications")
+public class MarkAsRead {
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    // 打印接收到的请求
+    private void printRequest(Object request) {
+        System.out.println("=== 收到标记通知为已读请求 (MarkAsRead) ===");
+        System.out.println("请求数据: " + request);
+        System.out.println("========================================");
+    }
+
+    // 打印查询结果
+    private void printQueryResult(Object result) {
+        System.out.println("=== 数据库查询结果 ===");
+        System.out.println("查询结果: " + result);
+        System.out.println("===================");
+    }
+
+    // 打印返回数据
+    private void printResponse(Object response) {
+        System.out.println("=== 准备返回的响应 ===");
+        System.out.println("响应数据: " + response);
+        System.out.println("===================");
+    }
+
+    // 请求DTO
+    public static class MarkAsReadRequest {
+        private String notificationId;
+
+        public String getNotificationId() { return notificationId; }
+        public void setNotificationId(String notificationId) { this.notificationId = notificationId; }
+    }
+
+    // 响应DTO
+    public static class MarkAsReadResponse {
+        private boolean success;
+        private String message;
+        private String notificationId;
+        private String readAt;
+
+        public MarkAsReadResponse(boolean success, String message, String notificationId, String readAt) {
+            this.success = success;
+            this.message = message;
+            this.notificationId = notificationId;
+            this.readAt = readAt;
+        }
+
+        public boolean isSuccess() { return success; }
+        public void setSuccess(boolean success) { this.success = success; }
+
+        public String getMessage() { return message; }
+        public void setMessage(String message) { this.message = message; }
+
+        public String getNotificationId() { return notificationId; }
+        public void setNotificationId(String notificationId) { this.notificationId = notificationId; }
+
+        public String getReadAt() { return readAt; }
+        public void setReadAt(String readAt) { this.readAt = readAt; }
+    }
+
+    @PutMapping("/mark-as-read")
+    public ResponseEntity<MarkAsReadResponse> markAsRead(
+            @RequestHeader(value = "Authorization", required = false) String authHeader,
+            @RequestBody MarkAsReadRequest request) {
+
+        try {
+            // 打印接收到的请求
+            printRequest(request);
+
+            // 1. 验证认证信息
+            if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new MarkAsReadResponse(false, "请先登录", request.getNotificationId(), null)
+                );
+            }
+
+            String token = authHeader.substring(7);
+
+            // 2. 根据token获取用户ID
+            String getUserSql = "SELECT user_id FROM user_sessions WHERE access_token = ? AND expires_at > NOW()";
+            List<Map<String, Object>> sessions = jdbcTemplate.queryForList(getUserSql, token);
+
+            if (sessions.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new MarkAsReadResponse(false, "登录已过期，请重新登录", request.getNotificationId(), null)
+                );
+            }
+
+            Map<String, Object> session = sessions.get(0);
+            Integer userId = (Integer) session.get("user_id");
+
+            // 3. 验证请求数据
+            if (request.getNotificationId() == null || request.getNotificationId().trim().isEmpty()) {
+                return ResponseEntity.badRequest().body(
+                        new MarkAsReadResponse(false, "通知ID不能为空", null, null)
+                );
+            }
+
+            // 4. 提取notificationId的数字部分
+            Integer notificationIdInt = null;
+            try {
+                if (request.getNotificationId().startsWith("notif_")) {
+                    notificationIdInt = Integer.parseInt(request.getNotificationId().substring(6));
+                } else {
+                    notificationIdInt = Integer.parseInt(request.getNotificationId());
+                }
+            } catch (NumberFormatException e) {
+                return ResponseEntity.badRequest().body(
+                        new MarkAsReadResponse(false, "通知ID格式错误", request.getNotificationId(), null)
+                );
+            }
+
+            // 5. 验证通知是否存在且属于当前用户
+            String checkNotificationSql = "SELECT notification_id, is_read FROM notifications WHERE notification_id = ? AND user_id = ?";
+            List<Map<String, Object>> notifications = jdbcTemplate.queryForList(checkNotificationSql, notificationIdInt, userId);
+
+            if (notifications.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.NOT_FOUND).body(
+                        new MarkAsReadResponse(false, "通知不存在或无权访问", request.getNotificationId(), null)
+                );
+            }
+
+            // 6. 检查通知是否已经是已读状态
+            Map<String, Object> notification = notifications.get(0);
+            Boolean isRead = (Boolean) notification.get("is_read");
+            if (isRead != null && isRead) {
+                return ResponseEntity.ok(
+                        new MarkAsReadResponse(true, "通知已经是已读状态", request.getNotificationId(), null)
+                );
+            }
+
+            // 7. 更新通知为已读状态
+            LocalDateTime now = LocalDateTime.now();
+            DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss");
+            String formattedNow = now.format(formatter) + "Z";
+
+            String updateSql = "UPDATE notifications SET is_read = true, read_at = ? WHERE notification_id = ? AND user_id = ?";
+            int updatedRows = jdbcTemplate.update(updateSql, now, notificationIdInt, userId);
+
+            printQueryResult("更新行数: " + updatedRows);
+
+            if (updatedRows > 0) {
+                MarkAsReadResponse response = new MarkAsReadResponse(
+                        true,
+                        "通知已标记为已读",
+                        request.getNotificationId(),
+                        formattedNow
+                );
+
+                // 打印返回数据
+                printResponse(response);
+
+                return ResponseEntity.ok(response);
+            } else {
+                return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                        new MarkAsReadResponse(false, "更新通知状态失败", request.getNotificationId(), null)
+                );
+            }
+
+        } catch (Exception e) {
+            System.err.println("标记通知为已读过程中发生错误: " + e.getMessage());
+            e.printStackTrace();
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                    new MarkAsReadResponse(false, "服务器内部错误: " + e.getMessage(), request.getNotificationId(), null)
+            );
+        }
+    }
+}
+--- 结束文件: MarkAsRead.java ---
+
+--- 开始文件: NotificationBatchDelete.java ---
+package com.vue.readingapp.notifications;
+
+import org.springframework.web.bind.annotation.*;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.beans.factory.annotation.Autowired;
+import java.util.*;
+
+@RestController
+@RequestMapping("/api/v1/notifications")
+public class NotificationBatchDelete {
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    // 打印接收到的请求
+    private void printRequest(Object request) {
+        System.out.println("=== 收到批量删除通知请求 ===");
+        System.out.println("请求数据: " + request);
+        System.out.println("=========================");
+    }
+
+    // 打印查询结果
+    private void printQueryResult(Object result) {
+        System.out.println("=== 数据库查询结果 ===");
+        System.out.println("查询结果: " + result);
+        System.out.println("===================");
+    }
+
+    // 打印返回数据
+    private void printResponse(Object response) {
+        System.out.println("=== 准备返回的响应 ===");
+        System.out.println("响应数据: " + response);
+        System.out.println("===================");
+    }
+
+    // 请求DTO
+    public static class BatchDeleteRequest {
+        private List<String> notificationIds;
+
+        public List<String> getNotificationIds() { return notificationIds; }
+        public void setNotificationIds(List<String> notificationIds) { this.notificationIds = notificationIds; }
+    }
+
+    // 响应DTO
+    public static class BatchDeleteResponse {
+        private boolean success;
+        private String message;
+        private int processedCount;
+        private int failedCount;
+        private List<FailedItem> failedItems;
+
+        public BatchDeleteResponse(boolean success, String message, int processedCount, int failedCount, List<FailedItem> failedItems) {
+            this.success = success;
+            this.message = message;
+            this.processedCount = processedCount;
+            this.failedCount = failedCount;
+            this.failedItems = failedItems;
+        }
+
+        public boolean isSuccess() { return success; }
+        public void setSuccess(boolean success) { this.success = success; }
+
+        public String getMessage() { return message; }
+        public void setMessage(String message) { this.message = message; }
+
+        public int getProcessedCount() { return processedCount; }
+        public void setProcessedCount(int processedCount) { this.processedCount = processedCount; }
+
+        public int getFailedCount() { return failedCount; }
+        public void setFailedCount(int failedCount) { this.failedCount = failedCount; }
+
+        public List<FailedItem> getFailedItems() { return failedItems; }
+        public void setFailedItems(List<FailedItem> failedItems) { this.failedItems = failedItems; }
+    }
+
+    public static class FailedItem {
+        private String id;
+        private String error;
+
+        public FailedItem(String id, String error) {
+            this.id = id;
+            this.error = error;
+        }
+
+        public String getId() { return id; }
+        public void setId(String id) { this.id = id; }
+
+        public String getError() { return error; }
+        public void setError(String error) { this.error = error; }
+    }
+
+    @DeleteMapping("/batch")
+    public ResponseEntity<BatchDeleteResponse> batchDelete(
+            @RequestHeader(value = "Authorization", required = false) String authHeader,
+            @RequestBody BatchDeleteRequest request) {
+
+        try {
+            // 打印接收到的请求
+            printRequest(request);
+
+            // 1. 验证认证信息
+            if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new BatchDeleteResponse(false, "请先登录", 0, 0, null)
+                );
+            }
+
+            String token = authHeader.substring(7);
+
+            // 2. 根据token获取用户ID
+            String getUserSql = "SELECT user_id FROM user_sessions WHERE access_token = ? AND expires_at > NOW()";
+            List<Map<String, Object>> sessions = jdbcTemplate.queryForList(getUserSql, token);
+
+            if (sessions.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new BatchDeleteResponse(false, "登录已过期，请重新登录", 0, 0, null)
+                );
+            }
+
+            Map<String, Object> session = sessions.get(0);
+            Integer userId = (Integer) session.get("user_id");
+
+            // 3. 验证请求数据
+            if (request.getNotificationIds() == null || request.getNotificationIds().isEmpty()) {
+                return ResponseEntity.badRequest().body(
+                        new BatchDeleteResponse(false, "请提供要删除的通知ID列表", 0, 0, null)
+                );
+            }
+
+            // 4. 转换ID列表为整数列表
+            List<Integer> notificationIdInts = new ArrayList<>();
+            List<FailedItem> failedItems = new ArrayList<>();
+
+            for (String notificationId : request.getNotificationIds()) {
+                try {
+                    if (notificationId.startsWith("notif_")) {
+                        notificationIdInts.add(Integer.parseInt(notificationId.substring(6)));
+                    } else {
+                        notificationIdInts.add(Integer.parseInt(notificationId));
+                    }
+                } catch (NumberFormatException e) {
+                    failedItems.add(new FailedItem(notificationId, "通知ID格式错误"));
+                }
+            }
+
+            if (notificationIdInts.isEmpty()) {
+                return ResponseEntity.badRequest().body(
+                        new BatchDeleteResponse(false, "没有有效的通知ID", 0, failedItems.size(), failedItems)
+                );
+            }
+
+            // 5. 构建IN查询参数
+            StringBuilder placeholders = new StringBuilder();
+            for (int i = 0; i < notificationIdInts.size(); i++) {
+                if (i > 0) placeholders.append(",");
+                placeholders.append("?");
+            }
+
+            // 6. 批量删除通知
+            String deleteSql = "DELETE FROM notifications WHERE notification_id IN (" + placeholders + ") AND user_id = ?";
+            List<Object> params = new ArrayList<>(notificationIdInts);
+            params.add(userId);
+
+            int deletedRows = jdbcTemplate.update(deleteSql, params.toArray());
+
+            printQueryResult("删除行数: " + deletedRows);
+
+            // 7. 创建响应
+            BatchDeleteResponse response = new BatchDeleteResponse(
+                    true,
+                    "批量删除通知成功",
+                    deletedRows,
+                    failedItems.size(),
+                    failedItems.isEmpty() ? null : failedItems
+            );
+
+            // 打印返回数据
+            printResponse(response);
+
+            return ResponseEntity.ok(response);
+
+        } catch (Exception e) {
+            System.err.println("批量删除通知过程中发生错误: " + e.getMessage());
+            e.printStackTrace();
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                    new BatchDeleteResponse(false, "服务器内部错误: " + e.getMessage(), 0, 0, null)
+            );
+        }
+    }
+}
+--- 结束文件: NotificationBatchDelete.java ---
+
+--- 开始文件: NotificationBatchMarkAsRead.java ---
+package com.vue.readingapp.notifications;
+
+import org.springframework.web.bind.annotation.*;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.beans.factory.annotation.Autowired;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.*;
+
+@RestController
+@RequestMapping("/api/v1/notifications")
+public class NotificationBatchMarkAsRead {
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    // 打印接收到的请求
+    private void printRequest(Object request) {
+        System.out.println("=== 收到批量标记通知为已读请求 ===");
+        System.out.println("请求数据: " + request);
+        System.out.println("===============================");
+    }
+
+    // 打印查询结果
+    private void printQueryResult(Object result) {
+        System.out.println("=== 数据库查询结果 ===");
+        System.out.println("查询结果: " + result);
+        System.out.println("===================");
+    }
+
+    // 打印返回数据
+    private void printResponse(Object response) {
+        System.out.println("=== 准备返回的响应 ===");
+        System.out.println("响应数据: " + response);
+        System.out.println("===================");
+    }
+
+    // 请求DTO
+    public static class BatchMarkAsReadRequest {
+        private List<String> ids;
+
+        public List<String> getIds() { return ids; }
+        public void setIds(List<String> ids) { this.ids = ids; }
+    }
+
+    // 响应DTO
+    public static class BatchMarkAsReadResponse {
+        private boolean success;
+        private String message;
+        private int processedCount;
+        private int failedCount;
+        private List<FailedItem> failedItems;
+
+        public BatchMarkAsReadResponse(boolean success, String message, int processedCount, int failedCount, List<FailedItem> failedItems) {
+            this.success = success;
+            this.message = message;
+            this.processedCount = processedCount;
+            this.failedCount = failedCount;
+            this.failedItems = failedItems;
+        }
+
+        public boolean isSuccess() { return success; }
+        public void setSuccess(boolean success) { this.success = success; }
+
+        public String getMessage() { return message; }
+        public void setMessage(String message) { this.message = message; }
+
+        public int getProcessedCount() { return processedCount; }
+        public void setProcessedCount(int processedCount) { this.processedCount = processedCount; }
+
+        public int getFailedCount() { return failedCount; }
+        public void setFailedCount(int failedCount) { this.failedCount = failedCount; }
+
+        public List<FailedItem> getFailedItems() { return failedItems; }
+        public void setFailedItems(List<FailedItem> failedItems) { this.failedItems = failedItems; }
+    }
+
+    public static class FailedItem {
+        private String id;
+        private String error;
+
+        public FailedItem(String id, String error) {
+            this.id = id;
+            this.error = error;
+        }
+
+        public String getId() { return id; }
+        public void setId(String id) { this.id = id; }
+
+        public String getError() { return error; }
+        public void setError(String error) { this.error = error; }
+    }
+
+    @PutMapping("/batch-read")
+    public ResponseEntity<BatchMarkAsReadResponse> batchMarkAsRead(
+            @RequestHeader(value = "Authorization", required = false) String authHeader,
+            @RequestBody BatchMarkAsReadRequest request) {
+
+        try {
+            // 打印接收到的请求
+            printRequest(request);
+
+            // 1. 验证认证信息
+            if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new BatchMarkAsReadResponse(false, "请先登录", 0, 0, null)
+                );
+            }
+
+            String token = authHeader.substring(7);
+
+            // 2. 根据token获取用户ID
+            String getUserSql = "SELECT user_id FROM user_sessions WHERE access_token = ? AND expires_at > NOW()";
+            List<Map<String, Object>> sessions = jdbcTemplate.queryForList(getUserSql, token);
+
+            if (sessions.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new BatchMarkAsReadResponse(false, "登录已过期，请重新登录", 0, 0, null)
+                );
+            }
+
+            Map<String, Object> session = sessions.get(0);
+            Integer userId = (Integer) session.get("user_id");
+
+            // 3. 验证请求数据
+            if (request.getIds() == null || request.getIds().isEmpty()) {
+                return ResponseEntity.badRequest().body(
+                        new BatchMarkAsReadResponse(false, "请提供要标记为已读的通知ID列表", 0, 0, null)
+                );
+            }
+
+            // 4. 转换ID列表为整数列表
+            List<Integer> notificationIdInts = new ArrayList<>();
+            List<FailedItem> failedItems = new ArrayList<>();
+
+            for (String notificationId : request.getIds()) {
+                try {
+                    if (notificationId.startsWith("notif_")) {
+                        notificationIdInts.add(Integer.parseInt(notificationId.substring(6)));
+                    } else {
+                        notificationIdInts.add(Integer.parseInt(notificationId));
+                    }
+                } catch (NumberFormatException e) {
+                    failedItems.add(new FailedItem(notificationId, "通知ID格式错误"));
+                }
+            }
+
+            if (notificationIdInts.isEmpty()) {
+                return ResponseEntity.badRequest().body(
+                        new BatchMarkAsReadResponse(false, "没有有效的通知ID", 0, failedItems.size(), failedItems)
+                );
+            }
+
+            // 5. 构建IN查询参数
+            StringBuilder placeholders = new StringBuilder();
+            for (int i = 0; i < notificationIdInts.size(); i++) {
+                if (i > 0) placeholders.append(",");
+                placeholders.append("?");
+            }
+
+            // 6. 批量标记为已读
+            LocalDateTime now = LocalDateTime.now();
+            DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss");
+
+            String updateSql = "UPDATE notifications SET is_read = true, read_at = ? WHERE notification_id IN (" + placeholders + ") AND user_id = ? AND is_read = false";
+            List<Object> params = new ArrayList<>();
+            params.add(now);
+            params.addAll(notificationIdInts);
+            params.add(userId);
+
+            int updatedRows = jdbcTemplate.update(updateSql, params.toArray());
+
+            printQueryResult("更新行数: " + updatedRows);
+
+            // 7. 创建响应
+            BatchMarkAsReadResponse response = new BatchMarkAsReadResponse(
+                    true,
+                    "批量标记通知为已读成功",
+                    updatedRows,
+                    failedItems.size(),
+                    failedItems.isEmpty() ? null : failedItems
+            );
+
+            // 打印返回数据
+            printResponse(response);
+
+            return ResponseEntity.ok(response);
+
+        } catch (Exception e) {
+            System.err.println("批量标记通知为已读过程中发生错误: " + e.getMessage());
+            e.printStackTrace();
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                    new BatchMarkAsReadResponse(false, "服务器内部错误: " + e.getMessage(), 0, 0, null)
+            );
+        }
+    }
+}
+--- 结束文件: NotificationBatchMarkAsRead.java ---
+
+--- 开始文件: NotificationClearHistory.java ---
+package com.vue.readingapp.notifications;
+
+import org.springframework.web.bind.annotation.*;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.beans.factory.annotation.Autowired;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.*;
+
+@RestController
+@RequestMapping("/api/v1/notifications")
+public class NotificationClearHistory {
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    // 打印接收到的请求
+    private void printRequest(Object request) {
+        System.out.println("=== 收到清空通知历史请求 ===");
+        System.out.println("请求数据: " + request);
+        System.out.println("=========================");
+    }
+
+    // 打印查询结果
+    private void printQueryResult(Object result) {
+        System.out.println("=== 数据库查询结果 ===");
+        System.out.println("查询结果: " + result);
+        System.out.println("===================");
+    }
+
+    // 打印返回数据
+    private void printResponse(Object response) {
+        System.out.println("=== 准备返回的响应 ===");
+        System.out.println("响应数据: " + response);
+        System.out.println("===================");
+    }
+
+    // 响应DTO
+    public static class ClearHistoryResponse {
+        private boolean success;
+        private String message;
+        private int clearedCount;
+        private String timestamp;
+
+        public ClearHistoryResponse(boolean success, String message, int clearedCount, String timestamp) {
+            this.success = success;
+            this.message = message;
+            this.clearedCount = clearedCount;
+            this.timestamp = timestamp;
+        }
+
+        public boolean isSuccess() { return success; }
+        public void setSuccess(boolean success) { this.success = success; }
+
+        public String getMessage() { return message; }
+        public void setMessage(String message) { this.message = message; }
+
+        public int getClearedCount() { return clearedCount; }
+        public void setClearedCount(int clearedCount) { this.clearedCount = clearedCount; }
+
+        public String getTimestamp() { return timestamp; }
+        public void setTimestamp(String timestamp) { this.timestamp = timestamp; }
+    }
+
+    @DeleteMapping("/history")
+    public ResponseEntity<ClearHistoryResponse> clearHistory(
+            @RequestHeader(value = "Authorization", required = false) String authHeader) {
+
+        try {
+            // 打印接收到的请求
+            printRequest("清空通知历史");
+
+            // 1. 验证认证信息
+            if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new ClearHistoryResponse(false, "请先登录", 0, null)
+                );
+            }
+
+            String token = authHeader.substring(7);
+
+            // 2. 根据token获取用户ID
+            String getUserSql = "SELECT user_id FROM user_sessions WHERE access_token = ? AND expires_at > NOW()";
+            List<Map<String, Object>> sessions = jdbcTemplate.queryForList(getUserSql, token);
+
+            if (sessions.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new ClearHistoryResponse(false, "登录已过期，请重新登录", 0, null)
+                );
+            }
+
+            Map<String, Object> session = sessions.get(0);
+            Integer userId = (Integer) session.get("user_id");
+
+            // 3. 查询要删除的通知总数
+            String countSql = "SELECT COUNT(*) as total_count FROM notifications WHERE user_id = ?";
+            Map<String, Object> countResult = jdbcTemplate.queryForMap(countSql, userId);
+            long totalCount = ((Number) countResult.get("total_count")).longValue();
+
+            printQueryResult("要删除的通知总数: " + totalCount);
+
+            if (totalCount == 0) {
+                return ResponseEntity.ok(
+                        new ClearHistoryResponse(true, "没有通知历史可清除", 0, null)
+                );
+            }
+
+            // 4. 删除所有通知历史
+            String deleteSql = "DELETE FROM notifications WHERE user_id = ?";
+            int deletedRows = jdbcTemplate.update(deleteSql, userId);
+
+            printQueryResult("删除行数: " + deletedRows);
+
+            if (deletedRows > 0) {
+                LocalDateTime now = LocalDateTime.now();
+                DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss");
+                String formattedNow = now.format(formatter) + "Z";
+
+                ClearHistoryResponse response = new ClearHistoryResponse(
+                        true,
+                        "通知历史已清空",
+                        deletedRows,
+                        formattedNow
+                );
+
+                // 打印返回数据
+                printResponse(response);
+
+                return ResponseEntity.ok(response);
+            } else {
+                return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                        new ClearHistoryResponse(false, "清空通知历史失败", 0, null)
+                );
+            }
+
+        } catch (Exception e) {
+            System.err.println("清空通知历史过程中发生错误: " + e.getMessage());
+            e.printStackTrace();
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                    new ClearHistoryResponse(false, "服务器内部错误: " + e.getMessage(), 0, null)
+            );
+        }
+    }
+}
+--- 结束文件: NotificationClearHistory.java ---
+
+--- 开始文件: NotificationCreate.java ---
+package com.vue.readingapp.notifications;
+
+import org.springframework.web.bind.annotation.*;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.beans.factory.annotation.Autowired;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.time.Duration;
+import java.util.*;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+@RestController
+@RequestMapping("/api/v1/notifications")
+public class NotificationCreate {
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    private ObjectMapper objectMapper = new ObjectMapper();
+
+    // 打印接收到的请求
+    private void printRequest(Object request) {
+        System.out.println("=== 收到创建通知请求 ===");
+        System.out.println("请求数据: " + request);
+        System.out.println("=====================");
+    }
+
+    // 打印查询结果
+    private void printQueryResult(Object result) {
+        System.out.println("=== 数据库查询结果 ===");
+        System.out.println("查询结果: " + result);
+        System.out.println("===================");
+    }
+
+    // 打印返回数据
+    private void printResponse(Object response) {
+        System.out.println("=== 准备返回的响应 ===");
+        System.out.println("响应数据: " + response);
+        System.out.println("===================");
+    }
+
+    // 计算相对时间
+    private String calculateRelativeTime(LocalDateTime dateTime) {
+        if (dateTime == null) {
+            return "未知时间";
+        }
+
+        LocalDateTime now = LocalDateTime.now();
+        Duration duration = Duration.between(dateTime, now);
+
+        long seconds = duration.toSeconds();
+        long minutes = seconds / 60;
+        long hours = minutes / 60;
+        long days = hours / 24;
+        long weeks = days / 7;
+        long months = days / 30;
+        long years = days / 365;
+
+        if (seconds < 60) {
+            return "刚刚";
+        } else if (minutes < 60) {
+            return minutes + "分钟前";
+        } else if (hours < 24) {
+            return hours + "小时前";
+        } else if (days < 7) {
+            return days + "天前";
+        } else if (weeks < 4) {
+            return weeks + "周前";
+        } else if (months < 12) {
+            return months + "个月前";
+        } else {
+            return years + "年前";
+        }
+    }
+
+    // 请求DTO
+    public static class CreateNotificationRequest {
+        private String type;
+        private String title;
+        private String message;
+        private String icon;
+        private String image;
+        private String actionUrl;
+        private String targetType;
+        private String targetId;
+        private Map<String, Object> metadata;
+
+        public CreateNotificationRequest() {
+            this.metadata = new HashMap<>();
+        }
+
+        public String getType() { return type; }
+        public void setType(String type) { this.type = type; }
+
+        public String getTitle() { return title; }
+        public void setTitle(String title) { this.title = title; }
+
+        public String getMessage() { return message; }
+        public void setMessage(String message) { this.message = message; }
+
+        public String getIcon() { return icon; }
+        public void setIcon(String icon) { this.icon = icon; }
+
+        public String getImage() { return image; }
+        public void setImage(String image) { this.image = image; }
+
+        public String getActionUrl() { return actionUrl; }
+        public void setActionUrl(String actionUrl) { this.actionUrl = actionUrl; }
+
+        public String getTargetType() { return targetType; }
+        public void setTargetType(String targetType) { this.targetType = targetType; }
+
+        public String getTargetId() { return targetId; }
+        public void setTargetId(String targetId) { this.targetId = targetId; }
+
+        public Map<String, Object> getMetadata() { return metadata; }
+        public void setMetadata(Map<String, Object> metadata) { this.metadata = metadata; }
+    }
+
+    // 响应DTO
+    public static class CreateNotificationResponse {
+        private boolean success;
+        private String message;
+        private NotificationData notification;
+
+        public CreateNotificationResponse(boolean success, String message, NotificationData notification) {
+            this.success = success;
+            this.message = message;
+            this.notification = notification;
+        }
+
+        public boolean isSuccess() { return success; }
+        public void setSuccess(boolean success) { this.success = success; }
+
+        public String getMessage() { return message; }
+        public void setMessage(String message) { this.message = message; }
+
+        public NotificationData getNotification() { return notification; }
+        public void setNotification(NotificationData notification) { this.notification = notification; }
+    }
+
+    public static class NotificationData {
+        private String id;
+        private String type;
+        private String title;
+        private String message;
+        private String icon;
+        private String image;
+        private boolean read;
+        private LocalDateTime readAt;
+        private LocalDateTime createdAt;
+        private String relativeTime;
+        private String actionUrl;
+        private String targetType;
+        private String targetId;
+        private Map<String, Object> metadata;
+
+        public NotificationData() {
+            this.metadata = new HashMap<>();
+        }
+
+        public String getId() { return id; }
+        public void setId(String id) { this.id = id; }
+
+        public String getType() { return type; }
+        public void setType(String type) { this.type = type; }
+
+        public String getTitle() { return title; }
+        public void setTitle(String title) { this.title = title; }
+
+        public String getMessage() { return message; }
+        public void setMessage(String message) { this.message = message; }
+
+        public String getIcon() { return icon; }
+        public void setIcon(String icon) { this.icon = icon; }
+
+        public String getImage() { return image; }
+        public void setImage(String image) { this.image = image; }
+
+        public boolean isRead() { return read; }
+        public void setRead(boolean read) { this.read = read; }
+
+        public LocalDateTime getReadAt() { return readAt; }
+        public void setReadAt(LocalDateTime readAt) { this.readAt = readAt; }
+
+        public LocalDateTime getCreatedAt() { return createdAt; }
+        public void setCreatedAt(LocalDateTime createdAt) { this.createdAt = createdAt; }
+
+        public String getRelativeTime() { return relativeTime; }
+        public void setRelativeTime(String relativeTime) { this.relativeTime = relativeTime; }
+
+        public String getActionUrl() { return actionUrl; }
+        public void setActionUrl(String actionUrl) { this.actionUrl = actionUrl; }
+
+        public String getTargetType() { return targetType; }
+        public void setTargetType(String targetType) { this.targetType = targetType; }
+
+        public String getTargetId() { return targetId; }
+        public void setTargetId(String targetId) { this.targetId = targetId; }
+
+        public Map<String, Object> getMetadata() { return metadata; }
+        public void setMetadata(Map<String, Object> metadata) { this.metadata = metadata; }
+    }
+
+    @PostMapping("")
+    public ResponseEntity<CreateNotificationResponse> createNotification(
+            @RequestHeader(value = "Authorization", required = false) String authHeader,
+            @RequestBody CreateNotificationRequest request) {
+
+        try {
+            // 打印接收到的请求
+            printRequest(request);
+
+            // 1. 验证认证信息
+            if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new CreateNotificationResponse(false, "请先登录", null)
+                );
+            }
+
+            String token = authHeader.substring(7);
+
+            // 2. 根据token获取用户ID
+            String getUserSql = "SELECT user_id FROM user_sessions WHERE access_token = ? AND expires_at > NOW()";
+            List<Map<String, Object>> sessions = jdbcTemplate.queryForList(getUserSql, token);
+
+            if (sessions.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new CreateNotificationResponse(false, "登录已过期，请重新登录", null)
+                );
+            }
+
+            Map<String, Object> session = sessions.get(0);
+            Integer userId = (Integer) session.get("user_id");
+
+            // 3. 验证请求数据
+            if (request.getType() == null || request.getType().trim().isEmpty()) {
+                return ResponseEntity.badRequest().body(
+                        new CreateNotificationResponse(false, "通知类型不能为空", null)
+                );
+            }
+
+            if (request.getTitle() == null || request.getTitle().trim().isEmpty()) {
+                return ResponseEntity.badRequest().body(
+                        new CreateNotificationResponse(false, "通知标题不能为空", null)
+                );
+            }
+
+            if (request.getMessage() == null || request.getMessage().trim().isEmpty()) {
+                return ResponseEntity.badRequest().body(
+                        new CreateNotificationResponse(false, "通知消息不能为空", null)
+                );
+            }
+
+            // 4. 准备插入数据
+            LocalDateTime now = LocalDateTime.now();
+            DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss");
+            String formattedNow = now.format(formatter) + "Z";
+
+            // 转换metadata为JSON字符串
+            String metadataJson = "{}";
+            try {
+                metadataJson = objectMapper.writeValueAsString(request.getMetadata());
+            } catch (Exception e) {
+                System.err.println("转换metadata为JSON失败: " + e.getMessage());
+            }
+
+            // 5. 插入通知到数据库
+            String insertSql = "INSERT INTO notifications (user_id, type, title, message, icon_url, image_url, action_url, target_type, target_id, metadata, is_read, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+
+            int insertedRows = jdbcTemplate.update(insertSql,
+                    userId,
+                    request.getType(),
+                    request.getTitle(),
+                    request.getMessage(),
+                    request.getIcon(),
+                    request.getImage(),
+                    request.getActionUrl(),
+                    request.getTargetType(),
+                    request.getTargetId(),
+                    metadataJson,
+                    false, // is_read默认为false
+                    now
+            );
+
+            printQueryResult("插入行数: " + insertedRows);
+
+            if (insertedRows > 0) {
+                // 6. 获取刚插入的通知ID
+                String getLastIdSql = "SELECT LAST_INSERT_ID() as last_id";
+                Map<String, Object> lastIdResult = jdbcTemplate.queryForMap(getLastIdSql);
+                Integer notificationId = ((Number) lastIdResult.get("last_id")).intValue();
+
+                // 7. 创建响应数据
+                NotificationData notification = new NotificationData();
+                notification.setId("notif_" + notificationId);
+                notification.setType(request.getType());
+                notification.setTitle(request.getTitle());
+                notification.setMessage(request.getMessage());
+                notification.setIcon(request.getIcon());
+                notification.setImage(request.getImage());
+                notification.setActionUrl(request.getActionUrl());
+                notification.setTargetType(request.getTargetType());
+                notification.setTargetId(request.getTargetId());
+                notification.setMetadata(request.getMetadata());
+                notification.setRead(false);
+                notification.setReadAt(null);
+                notification.setCreatedAt(now);
+                notification.setRelativeTime(calculateRelativeTime(now));
+
+                // 8. 创建响应
+                CreateNotificationResponse response = new CreateNotificationResponse(
+                        true,
+                        "通知创建成功",
+                        notification
+                );
+
+                // 打印返回数据
+                printResponse(response);
+
+                return ResponseEntity.status(HttpStatus.CREATED).body(response);
+            } else {
+                return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                        new CreateNotificationResponse(false, "创建通知失败", null)
+                );
+            }
+
+        } catch (Exception e) {
+            System.err.println("创建通知过程中发生错误: " + e.getMessage());
+            e.printStackTrace();
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                    new CreateNotificationResponse(false, "服务器内部错误: " + e.getMessage(), null)
+            );
+        }
+    }
+}
+--- 结束文件: NotificationCreate.java ---
+
+--- 开始文件: NotificationDelete.java ---
+package com.vue.readingapp.notifications;
+
+import org.springframework.web.bind.annotation.*;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.beans.factory.annotation.Autowired;
+import java.util.*;
+
+@RestController
+@RequestMapping("/api/v1/notifications")
+public class NotificationDelete {
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    // 打印接收到的请求
+    private void printRequest(Object request) {
+        System.out.println("=== 收到删除通知请求 ===");
+        System.out.println("请求数据: " + request);
+        System.out.println("=====================");
+    }
+
+    // 打印查询结果
+    private void printQueryResult(Object result) {
+        System.out.println("=== 数据库查询结果 ===");
+        System.out.println("查询结果: " + result);
+        System.out.println("===================");
+    }
+
+    // 打印返回数据
+    private void printResponse(Object response) {
+        System.out.println("=== 准备返回的响应 ===");
+        System.out.println("响应数据: " + response);
+        System.out.println("===================");
+    }
+
+    // 请求DTO
+    public static class DeleteNotificationRequest {
+        private String notificationId;
+
+        public String getNotificationId() { return notificationId; }
+        public void setNotificationId(String notificationId) { this.notificationId = notificationId; }
+    }
+
+    // 响应DTO
+    public static class DeleteNotificationResponse {
+        private boolean success;
+        private String message;
+        private String notificationId;
+
+        public DeleteNotificationResponse(boolean success, String message, String notificationId) {
+            this.success = success;
+            this.message = message;
+            this.notificationId = notificationId;
+        }
+
+        public boolean isSuccess() { return success; }
+        public void setSuccess(boolean success) { this.success = success; }
+
+        public String getMessage() { return message; }
+        public void setMessage(String message) { this.message = message; }
+
+        public String getNotificationId() { return notificationId; }
+        public void setNotificationId(String notificationId) { this.notificationId = notificationId; }
+    }
+
+    @DeleteMapping("/{notificationId}")
+    public ResponseEntity<DeleteNotificationResponse> deleteNotification(
+            @RequestHeader(value = "Authorization", required = false) String authHeader,
+            @PathVariable String notificationId) {
+
+        try {
+            // 创建请求对象
+            DeleteNotificationRequest request = new DeleteNotificationRequest();
+            request.setNotificationId(notificationId);
+
+            // 打印接收到的请求
+            printRequest(request);
+
+            // 1. 验证认证信息
+            if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new DeleteNotificationResponse(false, "请先登录", notificationId)
+                );
+            }
+
+            String token = authHeader.substring(7);
+
+            // 2. 根据token获取用户ID
+            String getUserSql = "SELECT user_id FROM user_sessions WHERE access_token = ? AND expires_at > NOW()";
+            List<Map<String, Object>> sessions = jdbcTemplate.queryForList(getUserSql, token);
+
+            if (sessions.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new DeleteNotificationResponse(false, "登录已过期，请重新登录", notificationId)
+                );
+            }
+
+            Map<String, Object> session = sessions.get(0);
+            Integer userId = (Integer) session.get("user_id");
+
+            // 3. 提取notificationId的数字部分
+            Integer notificationIdInt = null;
+            try {
+                if (notificationId.startsWith("notif_")) {
+                    notificationIdInt = Integer.parseInt(notificationId.substring(6));
+                } else {
+                    notificationIdInt = Integer.parseInt(notificationId);
+                }
+            } catch (NumberFormatException e) {
+                return ResponseEntity.badRequest().body(
+                        new DeleteNotificationResponse(false, "通知ID格式错误", notificationId)
+                );
+            }
+
+            // 4. 验证通知是否存在且属于当前用户
+            String checkNotificationSql = "SELECT notification_id FROM notifications WHERE notification_id = ? AND user_id = ?";
+            List<Map<String, Object>> notifications = jdbcTemplate.queryForList(checkNotificationSql, notificationIdInt, userId);
+
+            if (notifications.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.NOT_FOUND).body(
+                        new DeleteNotificationResponse(false, "通知不存在或无权访问", notificationId)
+                );
+            }
+
+            // 5. 删除通知
+            String deleteSql = "DELETE FROM notifications WHERE notification_id = ? AND user_id = ?";
+            int deletedRows = jdbcTemplate.update(deleteSql, notificationIdInt, userId);
+
+            printQueryResult("删除行数: " + deletedRows);
+
+            if (deletedRows > 0) {
+                DeleteNotificationResponse response = new DeleteNotificationResponse(
+                        true,
+                        "通知删除成功",
+                        notificationId
+                );
+
+                // 打印返回数据
+                printResponse(response);
+
+                return ResponseEntity.ok(response);
+            } else {
+                return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                        new DeleteNotificationResponse(false, "删除通知失败", notificationId)
+                );
+            }
+
+        } catch (Exception e) {
+            System.err.println("删除通知过程中发生错误: " + e.getMessage());
+            e.printStackTrace();
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                    new DeleteNotificationResponse(false, "服务器内部错误: " + e.getMessage(), notificationId)
+            );
+        }
+    }
+}
+--- 结束文件: NotificationDelete.java ---
+
+--- 开始文件: NotificationGet.java ---
+package com.vue.readingapp.notifications;
+
+import org.springframework.web.bind.annotation.*;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.RowMapper;
+import org.springframework.beans.factory.annotation.Autowired;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.time.Duration;
+import java.util.*;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+@RestController
+@RequestMapping("/api/v1/notifications")
+public class NotificationGet {
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    private ObjectMapper objectMapper = new ObjectMapper();
+
+    // 打印接收到的请求
+    private void printRequest(Object request) {
+        System.out.println("=== 收到获取通知列表请求 ===");
+        System.out.println("请求数据: " + request);
+        System.out.println("========================");
+    }
+
+    // 打印查询结果
+    private void printQueryResult(Object result) {
+        System.out.println("=== 数据库查询结果 ===");
+        System.out.println("查询结果: " + result);
+        System.out.println("===================");
+    }
+
+    // 打印返回数据
+    private void printResponse(Object response) {
+        System.out.println("=== 准备返回的响应 ===");
+        System.out.println("响应数据: " + response);
+        System.out.println("===================");
+    }
+
+    // 计算相对时间
+    private String calculateRelativeTime(LocalDateTime dateTime) {
+        if (dateTime == null) {
+            return "未知时间";
+        }
+
+        LocalDateTime now = LocalDateTime.now();
+        Duration duration = Duration.between(dateTime, now);
+
+        long seconds = duration.getSeconds();
+        long minutes = seconds / 60;
+        long hours = minutes / 60;
+        long days = hours / 24;
+        long weeks = days / 7;
+        long months = days / 30;
+        long years = days / 365;
+
+        if (seconds < 60) {
+            return "刚刚";
+        } else if (minutes < 60) {
+            return minutes + "分钟前";
+        } else if (hours < 24) {
+            return hours + "小时前";
+        } else if (days < 7) {
+            return days + "天前";
+        } else if (weeks < 4) {
+            return weeks + "周前";
+        } else if (months < 12) {
+            return months + "个月前";
+        } else {
+            return years + "年前";
+        }
+    }
+
+    // 请求DTO
+    public static class GetNotificationsRequest {
+        private Integer page = 1;
+        private Integer pageSize = 20;
+        private String type;
+        private Boolean unreadOnly = false;
+        private String sortBy = "created_at";
+        private String sortOrder = "desc";
+
+        public Integer getPage() { return page; }
+        public void setPage(Integer page) { this.page = page; }
+
+        public Integer getPageSize() { return pageSize; }
+        public void setPageSize(Integer pageSize) { this.pageSize = pageSize; }
+
+        public String getType() { return type; }
+        public void setType(String type) { this.type = type; }
+
+        public Boolean getUnreadOnly() { return unreadOnly; }
+        public void setUnreadOnly(Boolean unreadOnly) { this.unreadOnly = unreadOnly; }
+
+        public String getSortBy() { return sortBy; }
+        public void setSortBy(String sortBy) { this.sortBy = sortBy; }
+
+        public String getSortOrder() { return sortOrder; }
+        public void setSortOrder(String sortOrder) { this.sortOrder = sortOrder; }
+    }
+
+    // 响应DTO
+    public static class GetNotificationsResponse {
+        private boolean success;
+        private String message;
+        private List<NotificationData> notifications;
+        private PaginationData pagination;
+
+        public GetNotificationsResponse(boolean success, String message, List<NotificationData> notifications, PaginationData pagination) {
+            this.success = success;
+            this.message = message;
+            this.notifications = notifications;
+            this.pagination = pagination;
+        }
+
+        public boolean isSuccess() { return success; }
+        public void setSuccess(boolean success) { this.success = success; }
+
+        public String getMessage() { return message; }
+        public void setMessage(String message) { this.message = message; }
+
+        public List<NotificationData> getNotifications() { return notifications; }
+        public void setNotifications(List<NotificationData> notifications) { this.notifications = notifications; }
+
+        public PaginationData getPagination() { return pagination; }
+        public void setPagination(PaginationData pagination) { this.pagination = pagination; }
+    }
+
+    public static class NotificationData {
+        private String id;
+        private String type;
+        private String title;
+        private String message;
+        private String icon;
+        private String image;
+        private boolean read;
+        private String readAt;
+        private String createdAt;
+        private String relativeTime;
+        private String actionUrl;
+        private String targetType;
+        private String targetId;
+        private Map<String, Object> metadata;
+
+        public NotificationData() {
+            this.metadata = new HashMap<>();
+        }
+
+        public String getId() { return id; }
+        public void setId(String id) { this.id = id; }
+
+        public String getType() { return type; }
+        public void setType(String type) { this.type = type; }
+
+        public String getTitle() { return title; }
+        public void setTitle(String title) { this.title = title; }
+
+        public String getMessage() { return message; }
+        public void setMessage(String message) { this.message = message; }
+
+        public String getIcon() { return icon; }
+        public void setIcon(String icon) { this.icon = icon; }
+
+        public String getImage() { return image; }
+        public void setImage(String image) { this.image = image; }
+
+        public boolean isRead() { return read; }
+        public void setRead(boolean read) { this.read = read; }
+
+        public String getReadAt() { return readAt; }
+        public void setReadAt(String readAt) { this.readAt = readAt; }
+
+        public String getCreatedAt() { return createdAt; }
+        public void setCreatedAt(String createdAt) { this.createdAt = createdAt; }
+
+        public String getRelativeTime() { return relativeTime; }
+        public void setRelativeTime(String relativeTime) { this.relativeTime = relativeTime; }
+
+        public String getActionUrl() { return actionUrl; }
+        public void setActionUrl(String actionUrl) { this.actionUrl = actionUrl; }
+
+        public String getTargetType() { return targetType; }
+        public void setTargetType(String targetType) { this.targetType = targetType; }
+
+        public String getTargetId() { return targetId; }
+        public void setTargetId(String targetId) { this.targetId = targetId; }
+
+        public Map<String, Object> getMetadata() { return metadata; }
+        public void setMetadata(Map<String, Object> metadata) { this.metadata = metadata; }
+    }
+
+    public static class PaginationData {
+        private int page;
+        private int pageSize;
+        private long total;
+        private int totalPages;
+
+        public PaginationData(int page, int pageSize, long total) {
+            this.page = page;
+            this.pageSize = pageSize;
+            this.total = total;
+            this.totalPages = (int) Math.ceil((double) total / pageSize);
+        }
+
+        public int getPage() { return page; }
+        public void setPage(int page) { this.page = page; }
+
+        public int getPageSize() { return pageSize; }
+        public void setPageSize(int pageSize) { this.pageSize = pageSize; }
+
+        public long getTotal() { return total; }
+        public void setTotal(long total) { this.total = total; }
+
+        public int getTotalPages() { return totalPages; }
+        public void setTotalPages(int totalPages) { this.totalPages = totalPages; }
+    }
+
+    @GetMapping("")
+    public ResponseEntity<GetNotificationsResponse> getNotifications(
+            @RequestHeader(value = "Authorization", required = false) String authHeader,
+            @RequestParam(value = "page", defaultValue = "1") Integer page,
+            @RequestParam(value = "pageSize", defaultValue = "20") Integer pageSize,
+            @RequestParam(value = "type", required = false) String type,
+            @RequestParam(value = "unreadOnly", defaultValue = "false") Boolean unreadOnly,
+            @RequestParam(value = "sortBy", defaultValue = "created_at") String sortBy,
+            @RequestParam(value = "sortOrder", defaultValue = "desc") String sortOrder) {
+
+        try {
+            // 创建请求对象
+            GetNotificationsRequest request = new GetNotificationsRequest();
+            request.setPage(page);
+            request.setPageSize(pageSize);
+            request.setType(type);
+            request.setUnreadOnly(unreadOnly);
+            request.setSortBy(sortBy);
+            request.setSortOrder(sortOrder);
+
+            // 打印接收到的请求
+            printRequest(request);
+
+            // 1. 验证认证信息
+            if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new GetNotificationsResponse(false, "请先登录", null, null)
+                );
+            }
+
+            String token = authHeader.substring(7);
+
+            // 2. 根据token获取用户ID
+            String getUserSql = "SELECT user_id FROM user_sessions WHERE access_token = ? AND expires_at > NOW()";
+            List<Map<String, Object>> sessions = jdbcTemplate.queryForList(getUserSql, token);
+
+            if (sessions.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new GetNotificationsResponse(false, "登录已过期，请重新登录", null, null)
+                );
+            }
+
+            Map<String, Object> session = sessions.get(0);
+            Integer userId = (Integer) session.get("user_id");
+
+            // 3. 构建查询条件
+            StringBuilder countSql = new StringBuilder("SELECT COUNT(*) as total FROM notifications WHERE user_id = ?");
+            StringBuilder querySql = new StringBuilder("SELECT notification_id, type, title, message, icon_url, image_url, action_url, target_type, target_id, metadata, is_read, read_at, created_at FROM notifications WHERE user_id = ?");
+
+            List<Object> params = new ArrayList<>();
+            List<Object> countParams = new ArrayList<>();
+
+            params.add(userId);
+            countParams.add(userId);
+
+            // 添加类型筛选
+            if (type != null && !type.trim().isEmpty()) {
+                querySql.append(" AND type = ?");
+                countSql.append(" AND type = ?");
+                params.add(type);
+                countParams.add(type);
+            }
+
+            // 添加未读筛选
+            if (unreadOnly != null && unreadOnly) {
+                querySql.append(" AND is_read = false");
+                countSql.append(" AND is_read = false");
+            }
+
+            // 4. 获取总数
+            Map<String, Object> countResult = jdbcTemplate.queryForMap(countSql.toString(), countParams.toArray());
+            long total = ((Number) countResult.get("total")).longValue();
+
+            // 5. 添加排序
+            String validSortBy = "created_at"; // 默认排序字段
+            if ("title".equals(sortBy)) {
+                validSortBy = "title";
+            } else if ("type".equals(sortBy)) {
+                validSortBy = "type";
+            } else if ("read".equals(sortBy)) {
+                validSortBy = "is_read";
+            }
+
+            String validSortOrder = "DESC".equalsIgnoreCase(sortOrder) ? "DESC" : "ASC";
+            querySql.append(" ORDER BY ").append(validSortBy).append(" ").append(validSortOrder);
+
+            // 6. 添加分页
+            int offset = (page - 1) * pageSize;
+            querySql.append(" LIMIT ? OFFSET ?");
+            params.add(pageSize);
+            params.add(offset);
+
+            // 7. 执行查询
+            List<Map<String, Object>> notificationsList = jdbcTemplate.queryForList(querySql.toString(), params.toArray());
+            printQueryResult(notificationsList);
+
+            // 8. 转换结果
+            List<NotificationData> notifications = new ArrayList<>();
+            DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss");
+
+            for (Map<String, Object> row : notificationsList) {
+                NotificationData notification = new NotificationData();
+
+                // 设置基本字段
+                notification.setId("notif_" + row.get("notification_id"));
+                notification.setType((String) row.get("type"));
+                notification.setTitle((String) row.get("title"));
+                notification.setMessage((String) row.get("message"));
+                notification.setIcon((String) row.get("icon_url"));
+                notification.setImage((String) row.get("image_url"));
+                notification.setActionUrl((String) row.get("action_url"));
+                notification.setTargetType((String) row.get("target_type"));
+
+                // 处理targetId
+                Object targetIdObj = row.get("target_id");
+                if (targetIdObj != null) {
+                    if (targetIdObj instanceof Number) {
+                        notification.setTargetId(String.valueOf(((Number) targetIdObj).intValue()));
+                    } else {
+                        notification.setTargetId(targetIdObj.toString());
+                    }
+                }
+
+                // 设置阅读状态
+                Boolean isRead = (Boolean) row.get("is_read");
+                notification.setRead(isRead != null && isRead);
+
+                // 处理时间字段
+                LocalDateTime createdAt = null;
+                if (row.get("created_at") != null) {
+                    if (row.get("created_at") instanceof java.sql.Timestamp) {
+                        createdAt = ((java.sql.Timestamp) row.get("created_at")).toLocalDateTime();
+                    } else if (row.get("created_at") instanceof LocalDateTime) {
+                        createdAt = (LocalDateTime) row.get("created_at");
+                    }
+
+                    if (createdAt != null) {
+                        notification.setCreatedAt(createdAt.format(formatter) + "Z");
+                        notification.setRelativeTime(calculateRelativeTime(createdAt));
+                    }
+                }
+
+                // 处理阅读时间
+                LocalDateTime readAt = null;
+                if (row.get("read_at") != null) {
+                    if (row.get("read_at") instanceof java.sql.Timestamp) {
+                        readAt = ((java.sql.Timestamp) row.get("read_at")).toLocalDateTime();
+                    } else if (row.get("read_at") instanceof LocalDateTime) {
+                        readAt = (LocalDateTime) row.get("read_at");
+                    }
+
+                    if (readAt != null) {
+                        notification.setReadAt(readAt.format(formatter) + "Z");
+                    }
+                }
+
+                // 处理metadata字段
+                Object metadataObj = row.get("metadata");
+                if (metadataObj != null) {
+                    try {
+                        if (metadataObj instanceof String) {
+                            Map<String, Object> metadataMap = objectMapper.readValue((String) metadataObj, Map.class);
+                            notification.setMetadata(metadataMap);
+                        } else if (metadataObj instanceof Map) {
+                            notification.setMetadata((Map<String, Object>) metadataObj);
+                        }
+                    } catch (Exception e) {
+                        System.err.println("解析metadata失败: " + e.getMessage());
+                        notification.setMetadata(new HashMap<>());
+                    }
+                }
+
+                notifications.add(notification);
+            }
+
+            // 9. 创建分页数据
+            PaginationData pagination = new PaginationData(page, pageSize, total);
+
+            // 10. 创建响应
+            GetNotificationsResponse response = new GetNotificationsResponse(
+                    true,
+                    "获取通知列表成功",
+                    notifications,
+                    pagination
+            );
+
+            // 打印返回数据
+            printResponse(response);
+
+            return ResponseEntity.ok(response);
+
+        } catch (Exception e) {
+            System.err.println("获取通知列表过程中发生错误: " + e.getMessage());
+            e.printStackTrace();
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                    new GetNotificationsResponse(false, "服务器内部错误: " + e.getMessage(), null, null)
+            );
+        }
+    }
+}
+--- 结束文件: NotificationGet.java ---
+
+--- 开始文件: NotificationGetById.java ---
+package com.vue.readingapp.notifications;
+
+import org.springframework.web.bind.annotation.*;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.beans.factory.annotation.Autowired;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.time.Duration;
+import java.util.*;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+@RestController
+@RequestMapping("/api/v1/notifications")
+public class NotificationGetById {
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    private ObjectMapper objectMapper = new ObjectMapper();
+
+    // 打印接收到的请求
+    private void printRequest(Object request) {
+        System.out.println("=== 收到获取单个通知详情请求 ===");
+        System.out.println("请求数据: " + request);
+        System.out.println("============================");
+    }
+
+    // 打印查询结果
+    private void printQueryResult(Object result) {
+        System.out.println("=== 数据库查询结果 ===");
+        System.out.println("查询结果: " + result);
+        System.out.println("===================");
+    }
+
+    // 打印返回数据
+    private void printResponse(Object response) {
+        System.out.println("=== 准备返回的响应 ===");
+        System.out.println("响应数据: " + response);
+        System.out.println("===================");
+    }
+
+    // 计算相对时间
+    private String calculateRelativeTime(LocalDateTime dateTime) {
+        if (dateTime == null) {
+            return "未知时间";
+        }
+
+        LocalDateTime now = LocalDateTime.now();
+        Duration duration = Duration.between(dateTime, now);
+
+        long seconds = duration.getSeconds();
+        long minutes = seconds / 60;
+        long hours = minutes / 60;
+        long days = hours / 24;
+        long weeks = days / 7;
+        long months = days / 30;
+        long years = days / 365;
+
+        if (seconds < 60) {
+            return "刚刚";
+        } else if (minutes < 60) {
+            return minutes + "分钟前";
+        } else if (hours < 24) {
+            return hours + "小时前";
+        } else if (days < 7) {
+            return days + "天前";
+        } else if (weeks < 4) {
+            return weeks + "周前";
+        } else if (months < 12) {
+            return months + "个月前";
+        } else {
+            return years + "年前";
+        }
+    }
+
+    // 请求DTO
+    public static class GetNotificationByIdRequest {
+        private String notificationId;
+
+        public String getNotificationId() { return notificationId; }
+        public void setNotificationId(String notificationId) { this.notificationId = notificationId; }
+    }
+
+    // 响应DTO
+    public static class GetNotificationByIdResponse {
+        private boolean success;
+        private String message;
+        private NotificationData notification;
+
+        public GetNotificationByIdResponse(boolean success, String message, NotificationData notification) {
+            this.success = success;
+            this.message = message;
+            this.notification = notification;
+        }
+
+        public boolean isSuccess() { return success; }
+        public void setSuccess(boolean success) { this.success = success; }
+
+        public String getMessage() { return message; }
+        public void setMessage(String message) { this.message = message; }
+
+        public NotificationData getNotification() { return notification; }
+        public void setNotification(NotificationData notification) { this.notification = notification; }
+    }
+
+    public static class NotificationData {
+        private String id;
+        private String type;
+        private String title;
+        private String message;
+        private String icon;
+        private String image;
+        private boolean read;
+        private String readAt;
+        private String createdAt;
+        private String relativeTime;
+        private String actionUrl;
+        private String targetType;
+        private String targetId;
+        private Map<String, Object> metadata;
+
+        public NotificationData() {
+            this.metadata = new HashMap<>();
+        }
+
+        public String getId() { return id; }
+        public void setId(String id) { this.id = id; }
+
+        public String getType() { return type; }
+        public void setType(String type) { this.type = type; }
+
+        public String getTitle() { return title; }
+        public void setTitle(String title) { this.title = title; }
+
+        public String getMessage() { return message; }
+        public void setMessage(String message) { this.message = message; }
+
+        public String getIcon() { return icon; }
+        public void setIcon(String icon) { this.icon = icon; }
+
+        public String getImage() { return image; }
+        public void setImage(String image) { this.image = image; }
+
+        public boolean isRead() { return read; }
+        public void setRead(boolean read) { this.read = read; }
+
+        public String getReadAt() { return readAt; }
+        public void setReadAt(String readAt) { this.readAt = readAt; }
+
+        public String getCreatedAt() { return createdAt; }
+        public void setCreatedAt(String createdAt) { this.createdAt = createdAt; }
+
+        public String getRelativeTime() { return relativeTime; }
+        public void setRelativeTime(String relativeTime) { this.relativeTime = relativeTime; }
+
+        public String getActionUrl() { return actionUrl; }
+        public void setActionUrl(String actionUrl) { this.actionUrl = actionUrl; }
+
+        public String getTargetType() { return targetType; }
+        public void setTargetType(String targetType) { this.targetType = targetType; }
+
+        public String getTargetId() { return targetId; }
+        public void setTargetId(String targetId) { this.targetId = targetId; }
+
+        public Map<String, Object> getMetadata() { return metadata; }
+        public void setMetadata(Map<String, Object> metadata) { this.metadata = metadata; }
+    }
+
+    @GetMapping("/{notificationId}")
+    public ResponseEntity<GetNotificationByIdResponse> getNotificationById(
+            @RequestHeader(value = "Authorization", required = false) String authHeader,
+            @PathVariable String notificationId) {
+
+        try {
+            // 创建请求对象
+            GetNotificationByIdRequest request = new GetNotificationByIdRequest();
+            request.setNotificationId(notificationId);
+
+            // 打印接收到的请求
+            printRequest(request);
+
+            // 1. 验证认证信息
+            if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new GetNotificationByIdResponse(false, "请先登录", null)
+                );
+            }
+
+            String token = authHeader.substring(7);
+
+            // 2. 根据token获取用户ID
+            String getUserSql = "SELECT user_id FROM user_sessions WHERE access_token = ? AND expires_at > NOW()";
+            List<Map<String, Object>> sessions = jdbcTemplate.queryForList(getUserSql, token);
+
+            if (sessions.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new GetNotificationByIdResponse(false, "登录已过期，请重新登录", null)
+                );
+            }
+
+            Map<String, Object> session = sessions.get(0);
+            Integer userId = (Integer) session.get("user_id");
+
+            // 3. 提取notificationId的数字部分
+            Integer notificationIdInt = null;
+            try {
+                if (notificationId.startsWith("notif_")) {
+                    notificationIdInt = Integer.parseInt(notificationId.substring(6));
+                } else {
+                    notificationIdInt = Integer.parseInt(notificationId);
+                }
+            } catch (NumberFormatException e) {
+                return ResponseEntity.badRequest().body(
+                        new GetNotificationByIdResponse(false, "通知ID格式错误", null)
+                );
+            }
+
+            // 4. 查询通知详情
+            String querySql = "SELECT notification_id, type, title, message, icon_url, image_url, action_url, target_type, target_id, metadata, is_read, read_at, created_at FROM notifications WHERE notification_id = ? AND user_id = ?";
+            List<Map<String, Object>> notifications = jdbcTemplate.queryForList(querySql, notificationIdInt, userId);
+
+            printQueryResult(notifications);
+
+            if (notifications.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.NOT_FOUND).body(
+                        new GetNotificationByIdResponse(false, "通知不存在或无权访问", null)
+                );
+            }
+
+            Map<String, Object> row = notifications.get(0);
+
+            // 5. 转换结果
+            NotificationData notification = new NotificationData();
+            DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss");
+
+            // 设置基本字段
+            notification.setId("notif_" + row.get("notification_id"));
+            notification.setType((String) row.get("type"));
+            notification.setTitle((String) row.get("title"));
+            notification.setMessage((String) row.get("message"));
+            notification.setIcon((String) row.get("icon_url"));
+            notification.setImage((String) row.get("image_url"));
+            notification.setActionUrl((String) row.get("action_url"));
+            notification.setTargetType((String) row.get("target_type"));
+
+            // 处理targetId
+            Object targetIdObj = row.get("target_id");
+            if (targetIdObj != null) {
+                if (targetIdObj instanceof Number) {
+                    notification.setTargetId(String.valueOf(((Number) targetIdObj).intValue()));
+                } else {
+                    notification.setTargetId(targetIdObj.toString());
+                }
+            }
+
+            // 设置阅读状态
+            Boolean isRead = (Boolean) row.get("is_read");
+            notification.setRead(isRead != null && isRead);
+
+            // 处理时间字段
+            LocalDateTime createdAt = null;
+            if (row.get("created_at") != null) {
+                if (row.get("created_at") instanceof java.sql.Timestamp) {
+                    createdAt = ((java.sql.Timestamp) row.get("created_at")).toLocalDateTime();
+                } else if (row.get("created_at") instanceof LocalDateTime) {
+                    createdAt = (LocalDateTime) row.get("created_at");
+                }
+
+                if (createdAt != null) {
+                    notification.setCreatedAt(createdAt.format(formatter) + "Z");
+                    notification.setRelativeTime(calculateRelativeTime(createdAt));
+                }
+            }
+
+            // 处理阅读时间
+            LocalDateTime readAt = null;
+            if (row.get("read_at") != null) {
+                if (row.get("read_at") instanceof java.sql.Timestamp) {
+                    readAt = ((java.sql.Timestamp) row.get("read_at")).toLocalDateTime();
+                } else if (row.get("read_at") instanceof LocalDateTime) {
+                    readAt = (LocalDateTime) row.get("read_at");
+                }
+
+                if (readAt != null) {
+                    notification.setReadAt(readAt.format(formatter) + "Z");
+                }
+            }
+
+            // 处理metadata字段
+            Object metadataObj = row.get("metadata");
+            if (metadataObj != null) {
+                try {
+                    if (metadataObj instanceof String) {
+                        Map<String, Object> metadataMap = objectMapper.readValue((String) metadataObj, Map.class);
+                        notification.setMetadata(metadataMap);
+                    } else if (metadataObj instanceof Map) {
+                        notification.setMetadata((Map<String, Object>) metadataObj);
+                    }
+                } catch (Exception e) {
+                    System.err.println("解析metadata失败: " + e.getMessage());
+                    notification.setMetadata(new HashMap<>());
+                }
+            }
+
+            // 6. 创建响应
+            GetNotificationByIdResponse response = new GetNotificationByIdResponse(
+                    true,
+                    "获取通知详情成功",
+                    notification
+            );
+
+            // 打印返回数据
+            printResponse(response);
+
+            return ResponseEntity.ok(response);
+
+        } catch (Exception e) {
+            System.err.println("获取通知详情过程中发生错误: " + e.getMessage());
+            e.printStackTrace();
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                    new GetNotificationByIdResponse(false, "服务器内部错误: " + e.getMessage(), null)
+            );
+        }
+    }
+}
+--- 结束文件: NotificationGetById.java ---
+
+--- 开始文件: NotificationGetHistory.java ---
+package com.vue.readingapp.notifications;
+
+import org.springframework.web.bind.annotation.*;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.beans.factory.annotation.Autowired;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.time.Duration;
+import java.util.*;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+@RestController
+@RequestMapping("/api/v1/notifications")
+public class NotificationGetHistory {
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    private ObjectMapper objectMapper = new ObjectMapper();
+
+    // 打印接收到的请求
+    private void printRequest(Object request) {
+        System.out.println("=== 收到获取通知历史请求 ===");
+        System.out.println("请求数据: " + request);
+        System.out.println("=========================");
+    }
+
+    // 打印查询结果
+    private void printQueryResult(Object result) {
+        System.out.println("=== 数据库查询结果 ===");
+        System.out.println("查询结果: " + result);
+        System.out.println("===================");
+    }
+
+    // 打印返回数据
+    private void printResponse(Object response) {
+        System.out.println("=== 准备返回的响应 ===");
+        System.out.println("响应数据: " + response);
+        System.out.println("===================");
+    }
+
+    // 计算相对时间
+    private String calculateRelativeTime(LocalDateTime dateTime) {
+        if (dateTime == null) {
+            return "未知时间";
+        }
+
+        LocalDateTime now = LocalDateTime.now();
+        Duration duration = Duration.between(dateTime, now);
+
+        long seconds = duration.getSeconds();
+        long minutes = seconds / 60;
+        long hours = minutes / 60;
+        long days = hours / 24;
+        long weeks = days / 7;
+        long months = days / 30;
+        long years = days / 365;
+
+        if (seconds < 60) {
+            return "刚刚";
+        } else if (minutes < 60) {
+            return minutes + "分钟前";
+        } else if (hours < 24) {
+            return hours + "小时前";
+        } else if (days < 7) {
+            return days + "天前";
+        } else if (weeks < 4) {
+            return weeks + "周前";
+        } else if (months < 12) {
+            return months + "个月前";
+        } else {
+            return years + "年前";
+        }
+    }
+
+    // 请求DTO
+    public static class GetHistoryRequest {
+        private Integer page = 1;
+        private Integer pageSize = 50;
+        private String startDate;
+        private String endDate;
+        private String type = "all";
+
+        public Integer getPage() { return page; }
+        public void setPage(Integer page) { this.page = page; }
+
+        public Integer getPageSize() { return pageSize; }
+        public void setPageSize(Integer pageSize) { this.pageSize = pageSize; }
+
+        public String getStartDate() { return startDate; }
+        public void setStartDate(String startDate) { this.startDate = startDate; }
+
+        public String getEndDate() { return endDate; }
+        public void setEndDate(String endDate) { this.endDate = endDate; }
+
+        public String getType() { return type; }
+        public void setType(String type) { this.type = type; }
+    }
+
+    // 响应DTO
+    public static class GetHistoryResponse {
+        private boolean success;
+        private String message;
+        private List<NotificationData> notifications;
+        private PaginationData pagination;
+
+        public GetHistoryResponse(boolean success, String message, List<NotificationData> notifications, PaginationData pagination) {
+            this.success = success;
+            this.message = message;
+            this.notifications = notifications;
+            this.pagination = pagination;
+        }
+
+        public boolean isSuccess() { return success; }
+        public void setSuccess(boolean success) { this.success = success; }
+
+        public String getMessage() { return message; }
+        public void setMessage(String message) { this.message = message; }
+
+        public List<NotificationData> getNotifications() { return notifications; }
+        public void setNotifications(List<NotificationData> notifications) { this.notifications = notifications; }
+
+        public PaginationData getPagination() { return pagination; }
+        public void setPagination(PaginationData pagination) { this.pagination = pagination; }
+    }
+
+    public static class NotificationData {
+        private String id;
+        private String type;
+        private String title;
+        private String message;
+        private String icon;
+        private String image;
+        private boolean read;
+        private String readAt;
+        private String createdAt;
+        private String relativeTime;
+        private String actionUrl;
+        private String targetType;
+        private String targetId;
+        private Map<String, Object> metadata;
+
+        public NotificationData() {
+            this.metadata = new HashMap<>();
+        }
+
+        public String getId() { return id; }
+        public void setId(String id) { this.id = id; }
+
+        public String getType() { return type; }
+        public void setType(String type) { this.type = type; }
+
+        public String getTitle() { return title; }
+        public void setTitle(String title) { this.title = title; }
+
+        public String getMessage() { return message; }
+        public void setMessage(String message) { this.message = message; }
+
+        public String getIcon() { return icon; }
+        public void setIcon(String icon) { this.icon = icon; }
+
+        public String getImage() { return image; }
+        public void setImage(String image) { this.image = image; }
+
+        public boolean isRead() { return read; }
+        public void setRead(boolean read) { this.read = read; }
+
+        public String getReadAt() { return readAt; }
+        public void setReadAt(String readAt) { this.readAt = readAt; }
+
+        public String getCreatedAt() { return createdAt; }
+        public void setCreatedAt(String createdAt) { this.createdAt = createdAt; }
+
+        public String getRelativeTime() { return relativeTime; }
+        public void setRelativeTime(String relativeTime) { this.relativeTime = relativeTime; }
+
+        public String getActionUrl() { return actionUrl; }
+        public void setActionUrl(String actionUrl) { this.actionUrl = actionUrl; }
+
+        public String getTargetType() { return targetType; }
+        public void setTargetType(String targetType) { this.targetType = targetType; }
+
+        public String getTargetId() { return targetId; }
+        public void setTargetId(String targetId) { this.targetId = targetId; }
+
+        public Map<String, Object> getMetadata() { return metadata; }
+        public void setMetadata(Map<String, Object> metadata) { this.metadata = metadata; }
+    }
+
+    public static class PaginationData {
+        private int page;
+        private int pageSize;
+        private long total;
+        private int totalPages;
+
+        public PaginationData(int page, int pageSize, long total) {
+            this.page = page;
+            this.pageSize = pageSize;
+            this.total = total;
+            this.totalPages = (int) Math.ceil((double) total / pageSize);
+        }
+
+        public int getPage() { return page; }
+        public void setPage(int page) { this.page = page; }
+
+        public int getPageSize() { return pageSize; }
+        public void setPageSize(int pageSize) { this.pageSize = pageSize; }
+
+        public long getTotal() { return total; }
+        public void setTotal(long total) { this.total = total; }
+
+        public int getTotalPages() { return totalPages; }
+        public void setTotalPages(int totalPages) { this.totalPages = totalPages; }
+    }
+
+    @GetMapping("/history")
+    public ResponseEntity<GetHistoryResponse> getHistory(
+            @RequestHeader(value = "Authorization", required = false) String authHeader,
+            @RequestParam(value = "page", defaultValue = "1") Integer page,
+            @RequestParam(value = "pageSize", defaultValue = "50") Integer pageSize,
+            @RequestParam(value = "startDate", required = false) String startDate,
+            @RequestParam(value = "endDate", required = false) String endDate,
+            @RequestParam(value = "type", defaultValue = "all") String type) {
+
+        try {
+            // 创建请求对象
+            GetHistoryRequest request = new GetHistoryRequest();
+            request.setPage(page);
+            request.setPageSize(pageSize);
+            request.setStartDate(startDate);
+            request.setEndDate(endDate);
+            request.setType(type);
+
+            // 打印接收到的请求
+            printRequest(request);
+
+            // 1. 验证认证信息
+            if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new GetHistoryResponse(false, "请先登录", null, null)
+                );
+            }
+
+            String token = authHeader.substring(7);
+
+            // 2. 根据token获取用户ID
+            String getUserSql = "SELECT user_id FROM user_sessions WHERE access_token = ? AND expires_at > NOW()";
+            List<Map<String, Object>> sessions = jdbcTemplate.queryForList(getUserSql, token);
+
+            if (sessions.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new GetHistoryResponse(false, "登录已过期，请重新登录", null, null)
+                );
+            }
+
+            Map<String, Object> session = sessions.get(0);
+            Integer userId = (Integer) session.get("user_id");
+
+            // 3. 构建查询条件
+            StringBuilder countSql = new StringBuilder("SELECT COUNT(*) as total FROM notifications WHERE user_id = ?");
+            StringBuilder querySql = new StringBuilder("SELECT notification_id, type, title, message, icon_url, image_url, action_url, target_type, target_id, metadata, is_read, read_at, created_at FROM notifications WHERE user_id = ?");
+
+            List<Object> params = new ArrayList<>();
+            List<Object> countParams = new ArrayList<>();
+
+            params.add(userId);
+            countParams.add(userId);
+
+            // 添加日期筛选
+            if (startDate != null && !startDate.trim().isEmpty()) {
+                querySql.append(" AND DATE(created_at) >= ?");
+                countSql.append(" AND DATE(created_at) >= ?");
+                params.add(startDate);
+                countParams.add(startDate);
+            }
+
+            if (endDate != null && !endDate.trim().isEmpty()) {
+                querySql.append(" AND DATE(created_at) <= ?");
+                countSql.append(" AND DATE(created_at) <= ?");
+                params.add(endDate);
+                countParams.add(endDate);
+            }
+
+            // 添加类型筛选
+            if (type != null && !type.equals("all") && !type.trim().isEmpty()) {
+                querySql.append(" AND type = ?");
+                countSql.append(" AND type = ?");
+                params.add(type);
+                countParams.add(type);
+            }
+
+            // 4. 获取总数
+            Map<String, Object> countResult = jdbcTemplate.queryForMap(countSql.toString(), countParams.toArray());
+            long total = ((Number) countResult.get("total")).longValue();
+
+            // 5. 添加排序
+            querySql.append(" ORDER BY created_at DESC");
+
+            // 6. 添加分页
+            int offset = (page - 1) * pageSize;
+            querySql.append(" LIMIT ? OFFSET ?");
+            params.add(pageSize);
+            params.add(offset);
+
+            // 7. 执行查询
+            List<Map<String, Object>> notificationsList = jdbcTemplate.queryForList(querySql.toString(), params.toArray());
+            printQueryResult(notificationsList);
+
+            // 8. 转换结果
+            List<NotificationData> notifications = new ArrayList<>();
+            DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss");
+
+            for (Map<String, Object> row : notificationsList) {
+                NotificationData notification = new NotificationData();
+
+                // 设置基本字段
+                notification.setId("notif_" + row.get("notification_id"));
+                notification.setType((String) row.get("type"));
+                notification.setTitle((String) row.get("title"));
+                notification.setMessage((String) row.get("message"));
+                notification.setIcon((String) row.get("icon_url"));
+                notification.setImage((String) row.get("image_url"));
+                notification.setActionUrl((String) row.get("action_url"));
+                notification.setTargetType((String) row.get("target_type"));
+
+                // 处理targetId
+                Object targetIdObj = row.get("target_id");
+                if (targetIdObj != null) {
+                    if (targetIdObj instanceof Number) {
+                        notification.setTargetId(String.valueOf(((Number) targetIdObj).intValue()));
+                    } else {
+                        notification.setTargetId(targetIdObj.toString());
+                    }
+                }
+
+                // 设置阅读状态
+                Boolean isRead = (Boolean) row.get("is_read");
+                notification.setRead(isRead != null && isRead);
+
+                // 处理时间字段
+                LocalDateTime createdAt = null;
+                if (row.get("created_at") != null) {
+                    if (row.get("created_at") instanceof java.sql.Timestamp) {
+                        createdAt = ((java.sql.Timestamp) row.get("created_at")).toLocalDateTime();
+                    } else if (row.get("created_at") instanceof LocalDateTime) {
+                        createdAt = (LocalDateTime) row.get("created_at");
+                    }
+
+                    if (createdAt != null) {
+                        notification.setCreatedAt(createdAt.format(formatter) + "Z");
+                        notification.setRelativeTime(calculateRelativeTime(createdAt));
+                    }
+                }
+
+                // 处理阅读时间
+                LocalDateTime readAt = null;
+                if (row.get("read_at") != null) {
+                    if (row.get("read_at") instanceof java.sql.Timestamp) {
+                        readAt = ((java.sql.Timestamp) row.get("read_at")).toLocalDateTime();
+                    } else if (row.get("read_at") instanceof LocalDateTime) {
+                        readAt = (LocalDateTime) row.get("read_at");
+                    }
+
+                    if (readAt != null) {
+                        notification.setReadAt(readAt.format(formatter) + "Z");
+                    }
+                }
+
+                // 处理metadata字段
+                Object metadataObj = row.get("metadata");
+                if (metadataObj != null) {
+                    try {
+                        if (metadataObj instanceof String) {
+                            Map<String, Object> metadataMap = objectMapper.readValue((String) metadataObj, Map.class);
+                            notification.setMetadata(metadataMap);
+                        } else if (metadataObj instanceof Map) {
+                            notification.setMetadata((Map<String, Object>) metadataObj);
+                        }
+                    } catch (Exception e) {
+                        System.err.println("解析metadata失败: " + e.getMessage());
+                        notification.setMetadata(new HashMap<>());
+                    }
+                }
+
+                notifications.add(notification);
+            }
+
+            // 9. 创建分页数据
+            PaginationData pagination = new PaginationData(page, pageSize, total);
+
+            // 10. 创建响应
+            GetHistoryResponse response = new GetHistoryResponse(
+                    true,
+                    "获取通知历史成功",
+                    notifications,
+                    pagination
+            );
+
+            // 打印返回数据
+            printResponse(response);
+
+            return ResponseEntity.ok(response);
+
+        } catch (Exception e) {
+            System.err.println("获取通知历史过程中发生错误: " + e.getMessage());
+            e.printStackTrace();
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                    new GetHistoryResponse(false, "服务器内部错误: " + e.getMessage(), null, null)
+            );
+        }
+    }
+}
+--- 结束文件: NotificationGetHistory.java ---
+
+--- 开始文件: NotificationGetSettings.java ---
+package com.vue.readingapp.notifications;
+
+import org.springframework.web.bind.annotation.*;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.beans.factory.annotation.Autowired;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.*;
+
+@RestController
+@RequestMapping("/api/v1/notifications")
+public class NotificationGetSettings {
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    // 打印接收到的请求
+    private void printRequest(Object request) {
+        System.out.println("=== 收到获取通知设置请求 ===");
+        System.out.println("请求数据: " + request);
+        System.out.println("=========================");
+    }
+
+    // 打印查询结果
+    private void printQueryResult(Object result) {
+        System.out.println("=== 数据库查询结果 ===");
+        System.out.println("查询结果: " + result);
+        System.out.println("===================");
+    }
+
+    // 打印返回数据
+    private void printResponse(Object response) {
+        System.out.println("=== 准备返回的响应 ===");
+        System.out.println("响应数据: " + response);
+        System.out.println("===================");
+    }
+
+    // 响应DTO
+    public static class GetSettingsResponse {
+        private boolean success;
+        private String message;
+        private NotificationSettingsData settings;
+
+        public GetSettingsResponse(boolean success, String message, NotificationSettingsData settings) {
+            this.success = success;
+            this.message = message;
+            this.settings = settings;
+        }
+
+        public boolean isSuccess() { return success; }
+        public void setSuccess(boolean success) { this.success = success; }
+
+        public String getMessage() { return message; }
+        public void setMessage(String message) { this.message = message; }
+
+        public NotificationSettingsData getSettings() { return settings; }
+        public void setSettings(NotificationSettingsData settings) { this.settings = settings; }
+    }
+
+    public static class NotificationSettingsData {
+        private boolean email;
+        private boolean push;
+        private boolean desktop;
+        private String frequency;
+        private QuietHoursData quietHours;
+        private NotificationTypesData types;
+        private String updatedAt;
+
+        public NotificationSettingsData() {
+            this.email = true;
+            this.push = true;
+            this.desktop = true;
+            this.frequency = "immediate";
+            this.quietHours = new QuietHoursData();
+            this.types = new NotificationTypesData();
+        }
+
+        public boolean isEmail() { return email; }
+        public void setEmail(boolean email) { this.email = email; }
+
+        public boolean isPush() { return push; }
+        public void setPush(boolean push) { this.push = push; }
+
+        public boolean isDesktop() { return desktop; }
+        public void setDesktop(boolean desktop) { this.desktop = desktop; }
+
+        public String getFrequency() { return frequency; }
+        public void setFrequency(String frequency) { this.frequency = frequency; }
+
+        public QuietHoursData getQuietHours() { return quietHours; }
+        public void setQuietHours(QuietHoursData quietHours) { this.quietHours = quietHours; }
+
+        public NotificationTypesData getTypes() { return types; }
+        public void setTypes(NotificationTypesData types) { this.types = types; }
+
+        public String getUpdatedAt() { return updatedAt; }
+        public void setUpdatedAt(String updatedAt) { this.updatedAt = updatedAt; }
+    }
+
+    public static class QuietHoursData {
+        private boolean enabled;
+        private String start;
+        private String end;
+
+        public QuietHoursData() {
+            this.enabled = true;
+            this.start = "22:00";
+            this.end = "08:00";
+        }
+
+        public boolean isEnabled() { return enabled; }
+        public void setEnabled(boolean enabled) { this.enabled = enabled; }
+
+        public String getStart() { return start; }
+        public void setStart(String start) { this.start = start; }
+
+        public String getEnd() { return end; }
+        public void setEnd(String end) { this.end = end; }
+    }
+
+    public static class NotificationTypesData {
+        private boolean document_shared;
+        private boolean review_reminder;
+        private boolean achievement_unlocked;
+        private boolean system_update;
+        private boolean promotional;
+
+        public NotificationTypesData() {
+            this.document_shared = true;
+            this.review_reminder = true;
+            this.achievement_unlocked = true;
+            this.system_update = true;
+            this.promotional = false;
+        }
+
+        public boolean isDocument_shared() { return document_shared; }
+        public void setDocument_shared(boolean document_shared) { this.document_shared = document_shared; }
+
+        public boolean isReview_reminder() { return review_reminder; }
+        public void setReview_reminder(boolean review_reminder) { this.review_reminder = review_reminder; }
+
+        public boolean isAchievement_unlocked() { return achievement_unlocked; }
+        public void setAchievement_unlocked(boolean achievement_unlocked) { this.achievement_unlocked = achievement_unlocked; }
+
+        public boolean isSystem_update() { return system_update; }
+        public void setSystem_update(boolean system_update) { this.system_update = system_update; }
+
+        public boolean isPromotional() { return promotional; }
+        public void setPromotional(boolean promotional) { this.promotional = promotional; }
+    }
+
+    @GetMapping("/settings")
+    public ResponseEntity<GetSettingsResponse> getSettings(
+            @RequestHeader(value = "Authorization", required = false) String authHeader) {
+
+        try {
+            // 打印接收到的请求
+            printRequest("获取通知设置");
+
+            // 1. 验证认证信息
+            if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new GetSettingsResponse(false, "请先登录", null)
+                );
+            }
+
+            String token = authHeader.substring(7);
+
+            // 2. 根据token获取用户ID
+            String getUserSql = "SELECT user_id FROM user_sessions WHERE access_token = ? AND expires_at > NOW()";
+            List<Map<String, Object>> sessions = jdbcTemplate.queryForList(getUserSql, token);
+
+            if (sessions.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new GetSettingsResponse(false, "登录已过期，请重新登录", null)
+                );
+            }
+
+            Map<String, Object> session = sessions.get(0);
+            Integer userId = (Integer) session.get("user_id");
+
+            // 3. 查询通知设置
+            String querySql = "SELECT email_notifications, push_notifications, desktop_notifications, notification_frequency, quiet_hours_enabled, quiet_hours_start, quiet_hours_end, notification_types, updated_at FROM notification_settings WHERE user_id = ?";
+            List<Map<String, Object>> settingsList = jdbcTemplate.queryForList(querySql, userId);
+
+            printQueryResult(settingsList);
+
+            // 4. 创建设置数据
+            NotificationSettingsData settings = new NotificationSettingsData();
+            DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss");
+
+            if (!settingsList.isEmpty()) {
+                Map<String, Object> row = settingsList.get(0);
+
+                // 设置基本字段
+                settings.setEmail(row.get("email_notifications") != null && (Boolean) row.get("email_notifications"));
+                settings.setPush(row.get("push_notifications") != null && (Boolean) row.get("push_notifications"));
+                settings.setDesktop(row.get("desktop_notifications") != null && (Boolean) row.get("desktop_notifications"));
+
+                if (row.get("notification_frequency") != null) {
+                    settings.setFrequency(row.get("notification_frequency").toString());
+                }
+
+                // 设置静默时间
+                QuietHoursData quietHours = new QuietHoursData();
+                quietHours.setEnabled(row.get("quiet_hours_enabled") != null && (Boolean) row.get("quiet_hours_enabled"));
+
+                if (row.get("quiet_hours_start") != null) {
+                    quietHours.setStart(row.get("quiet_hours_start").toString());
+                }
+
+                if (row.get("quiet_hours_end") != null) {
+                    quietHours.setEnd(row.get("quiet_hours_end").toString());
+                }
+
+                settings.setQuietHours(quietHours);
+
+                // 设置通知类型
+                NotificationTypesData types = new NotificationTypesData();
+                if (row.get("notification_types") != null) {
+                    try {
+                        String typesJson = row.get("notification_types").toString();
+                        // 简单解析JSON字符串，这里简化处理
+                        if (typesJson.contains("document_shared")) {
+                            types.setDocument_shared(typesJson.contains("\"document_shared\":true"));
+                        }
+                        if (typesJson.contains("review_reminder")) {
+                            types.setReview_reminder(typesJson.contains("\"review_reminder\":true"));
+                        }
+                        if (typesJson.contains("achievement_unlocked")) {
+                            types.setAchievement_unlocked(typesJson.contains("\"achievement_unlocked\":true"));
+                        }
+                        if (typesJson.contains("system_update")) {
+                            types.setSystem_update(typesJson.contains("\"system_update\":true"));
+                        }
+                        if (typesJson.contains("promotional")) {
+                            types.setPromotional(typesJson.contains("\"promotional\":true"));
+                        }
+                    } catch (Exception e) {
+                        System.err.println("解析通知类型失败: " + e.getMessage());
+                    }
+                }
+
+                settings.setTypes(types);
+
+                // 设置更新时间
+                if (row.get("updated_at") != null) {
+                    LocalDateTime updatedAt = null;
+                    if (row.get("updated_at") instanceof java.sql.Timestamp) {
+                        updatedAt = ((java.sql.Timestamp) row.get("updated_at")).toLocalDateTime();
+                    } else if (row.get("updated_at") instanceof LocalDateTime) {
+                        updatedAt = (LocalDateTime) row.get("updated_at");
+                    }
+
+                    if (updatedAt != null) {
+                        settings.setUpdatedAt(updatedAt.format(formatter) + "Z");
+                    }
+                }
+            } else {
+                // 如果没有设置记录，使用默认值
+                settings.setUpdatedAt(LocalDateTime.now().format(formatter) + "Z");
+            }
+
+            // 5. 创建响应
+            GetSettingsResponse response = new GetSettingsResponse(
+                    true,
+                    "获取通知设置成功",
+                    settings
+            );
+
+            // 打印返回数据
+            printResponse(response);
+
+            return ResponseEntity.ok(response);
+
+        } catch (Exception e) {
+            System.err.println("获取通知设置过程中发生错误: " + e.getMessage());
+            e.printStackTrace();
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                    new GetSettingsResponse(false, "服务器内部错误: " + e.getMessage(), null)
+            );
+        }
+    }
+}
+--- 结束文件: NotificationGetSettings.java ---
+
+--- 开始文件: NotificationGetStats.java ---
+package com.vue.readingapp.notifications;
+
+import org.springframework.web.bind.annotation.*;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.beans.factory.annotation.Autowired;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.*;
+
+@RestController
+@RequestMapping("/api/v1/notifications")
+public class NotificationGetStats {
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    // 打印接收到的请求
+    private void printRequest(Object request) {
+        System.out.println("=== 收到获取通知统计数据请求 ===");
+        System.out.println("请求数据: " + request);
+        System.out.println("=============================");
+    }
+
+    // 打印查询结果
+    private void printQueryResult(Object result) {
+        System.out.println("=== 数据库查询结果 ===");
+        System.out.println("查询结果: " + result);
+        System.out.println("===================");
+    }
+
+    // 打印返回数据
+    private void printResponse(Object response) {
+        System.out.println("=== 准备返回的响应 ===");
+        System.out.println("响应数据: " + response);
+        System.out.println("===================");
+    }
+
+    // 响应DTO
+    public static class GetStatsResponse {
+        private boolean success;
+        private String message;
+        private NotificationStatsData stats;
+
+        public GetStatsResponse(boolean success, String message, NotificationStatsData stats) {
+            this.success = success;
+            this.message = message;
+            this.stats = stats;
+        }
+
+        public boolean isSuccess() { return success; }
+        public void setSuccess(boolean success) { this.success = success; }
+
+        public String getMessage() { return message; }
+        public void setMessage(String message) { this.message = message; }
+
+        public NotificationStatsData getStats() { return stats; }
+        public void setStats(NotificationStatsData stats) { this.stats = stats; }
+    }
+
+    public static class NotificationStatsData {
+        private int totalNotifications;
+        private int unreadCount;
+        private double readRate;
+        private String formattedReadRate;
+        private Map<String, Integer> byType;
+        private Map<String, Integer> byDay;
+        private double averageDailyNotifications;
+        private String lastNotificationAt;
+
+        public NotificationStatsData() {
+            this.byType = new HashMap<>();
+            this.byDay = new HashMap<>();
+        }
+
+        public int getTotalNotifications() { return totalNotifications; }
+        public void setTotalNotifications(int totalNotifications) { this.totalNotifications = totalNotifications; }
+
+        public int getUnreadCount() { return unreadCount; }
+        public void setUnreadCount(int unreadCount) { this.unreadCount = unreadCount; }
+
+        public double getReadRate() { return readRate; }
+        public void setReadRate(double readRate) { this.readRate = readRate; }
+
+        public String getFormattedReadRate() { return formattedReadRate; }
+        public void setFormattedReadRate(String formattedReadRate) { this.formattedReadRate = formattedReadRate; }
+
+        public Map<String, Integer> getByType() { return byType; }
+        public void setByType(Map<String, Integer> byType) { this.byType = byType; }
+
+        public Map<String, Integer> getByDay() { return byDay; }
+        public void setByDay(Map<String, Integer> byDay) { this.byDay = byDay; }
+
+        public double getAverageDailyNotifications() { return averageDailyNotifications; }
+        public void setAverageDailyNotifications(double averageDailyNotifications) { this.averageDailyNotifications = averageDailyNotifications; }
+
+        public String getLastNotificationAt() { return lastNotificationAt; }
+        public void setLastNotificationAt(String lastNotificationAt) { this.lastNotificationAt = lastNotificationAt; }
+    }
+
+    @GetMapping("/stats")
+    public ResponseEntity<GetStatsResponse> getStats(
+            @RequestHeader(value = "Authorization", required = false) String authHeader) {
+
+        try {
+            // 打印接收到的请求
+            printRequest("获取通知统计数据");
+
+            // 1. 验证认证信息
+            if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new GetStatsResponse(false, "请先登录", null)
+                );
+            }
+
+            String token = authHeader.substring(7);
+
+            // 2. 根据token获取用户ID
+            String getUserSql = "SELECT user_id FROM user_sessions WHERE access_token = ? AND expires_at > NOW()";
+            List<Map<String, Object>> sessions = jdbcTemplate.queryForList(getUserSql, token);
+
+            if (sessions.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new GetStatsResponse(false, "登录已过期，请重新登录", null)
+                );
+            }
+
+            Map<String, Object> session = sessions.get(0);
+            Integer userId = (Integer) session.get("user_id");
+
+            // 3. 查询总通知数量
+            String totalSql = "SELECT COUNT(*) as total FROM notifications WHERE user_id = ?";
+            Map<String, Object> totalResult = jdbcTemplate.queryForMap(totalSql, userId);
+            long totalNotifications = ((Number) totalResult.get("total")).longValue();
+
+            // 4. 查询未读通知数量
+            String unreadSql = "SELECT COUNT(*) as unread FROM notifications WHERE user_id = ? AND is_read = false";
+            Map<String, Object> unreadResult = jdbcTemplate.queryForMap(unreadSql, userId);
+            long unreadCount = ((Number) unreadResult.get("unread")).longValue();
+
+            // 5. 计算阅读率
+            double readRate = 0.0;
+            String formattedReadRate = "0%";
+            if (totalNotifications > 0) {
+                readRate = ((double) (totalNotifications - unreadCount) / totalNotifications) * 100;
+                formattedReadRate = String.format("%.1f%%", readRate);
+            }
+
+            // 6. 按类型统计
+            String byTypeSql = "SELECT type, COUNT(*) as count FROM notifications WHERE user_id = ? GROUP BY type";
+            List<Map<String, Object>> byTypeResults = jdbcTemplate.queryForList(byTypeSql, userId);
+            Map<String, Integer> byType = new HashMap<>();
+
+            for (Map<String, Object> row : byTypeResults) {
+                String type = (String) row.get("type");
+                long count = ((Number) row.get("count")).longValue();
+                byType.put(type, (int) count);
+            }
+
+            // 7. 按天统计（最近7天）
+            String byDaySql = "SELECT DATE(created_at) as day, COUNT(*) as count FROM notifications WHERE user_id = ? AND created_at >= DATE_SUB(NOW(), INTERVAL 7 DAY) GROUP BY DATE(created_at) ORDER BY day";
+            List<Map<String, Object>> byDayResults = jdbcTemplate.queryForList(byDaySql, userId);
+            Map<String, Integer> byDay = new HashMap<>();
+
+            for (Map<String, Object> row : byDayResults) {
+                String day = row.get("day").toString();
+                long count = ((Number) row.get("count")).longValue();
+                byDay.put(day, (int) count);
+            }
+
+            // 8. 计算平均每日通知数
+            double averageDailyNotifications = 0.0;
+            if (totalNotifications > 0) {
+                // 获取用户注册时间或第一个通知的时间
+                String firstNotificationSql = "SELECT MIN(created_at) as first_notification FROM notifications WHERE user_id = ?";
+                Map<String, Object> firstResult = jdbcTemplate.queryForMap(firstNotificationSql, userId);
+
+                if (firstResult.get("first_notification") != null) {
+                    LocalDateTime firstNotification = null;
+                    if (firstResult.get("first_notification") instanceof java.sql.Timestamp) {
+                        firstNotification = ((java.sql.Timestamp) firstResult.get("first_notification")).toLocalDateTime();
+                    }
+
+                    if (firstNotification != null) {
+                        LocalDateTime now = LocalDateTime.now();
+                        long daysBetween = java.time.temporal.ChronoUnit.DAYS.between(firstNotification, now);
+                        if (daysBetween > 0) {
+                            averageDailyNotifications = (double) totalNotifications / daysBetween;
+                        }
+                    }
+                }
+            }
+
+            // 9. 获取最后通知时间
+            String lastNotificationSql = "SELECT MAX(created_at) as last_notification FROM notifications WHERE user_id = ?";
+            Map<String, Object> lastResult = jdbcTemplate.queryForMap(lastNotificationSql, userId);
+
+            String lastNotificationAt = null;
+            if (lastResult.get("last_notification") != null) {
+                LocalDateTime lastNotification = null;
+                if (lastResult.get("last_notification") instanceof java.sql.Timestamp) {
+                    lastNotification = ((java.sql.Timestamp) lastResult.get("last_notification")).toLocalDateTime();
+                }
+
+                if (lastNotification != null) {
+                    DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss");
+                    lastNotificationAt = lastNotification.format(formatter) + "Z";
+                }
+            }
+
+            // 10. 创建统计数据
+            NotificationStatsData stats = new NotificationStatsData();
+            stats.setTotalNotifications((int) totalNotifications);
+            stats.setUnreadCount((int) unreadCount);
+            stats.setReadRate(readRate);
+            stats.setFormattedReadRate(formattedReadRate);
+            stats.setByType(byType);
+            stats.setByDay(byDay);
+            stats.setAverageDailyNotifications(averageDailyNotifications);
+            stats.setLastNotificationAt(lastNotificationAt);
+
+            printQueryResult(stats);
+
+            // 11. 创建响应
+            GetStatsResponse response = new GetStatsResponse(
+                    true,
+                    "获取通知统计数据成功",
+                    stats
+            );
+
+            // 打印返回数据
+            printResponse(response);
+
+            return ResponseEntity.ok(response);
+
+        } catch (Exception e) {
+            System.err.println("获取通知统计数据过程中发生错误: " + e.getMessage());
+            e.printStackTrace();
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                    new GetStatsResponse(false, "服务器内部错误: " + e.getMessage(), null)
+            );
+        }
+    }
+}
+--- 结束文件: NotificationGetStats.java ---
+
+--- 开始文件: NotificationGetUnreadCount.java ---
+package com.vue.readingapp.notifications;
+
+import org.springframework.web.bind.annotation.*;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.beans.factory.annotation.Autowired;
+import java.util.*;
+
+@RestController
+@RequestMapping("/api/v1/notifications")
+public class NotificationGetUnreadCount {
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    // 打印接收到的请求
+    private void printRequest(Object request) {
+        System.out.println("=== 收到获取未读通知数量请求 ===");
+        System.out.println("请求数据: " + request);
+        System.out.println("===========================");
+    }
+
+    // 打印查询结果
+    private void printQueryResult(Object result) {
+        System.out.println("=== 数据库查询结果 ===");
+        System.out.println("查询结果: " + result);
+        System.out.println("===================");
+    }
+
+    // 打印返回数据
+    private void printResponse(Object response) {
+        System.out.println("=== 准备返回的响应 ===");
+        System.out.println("响应数据: " + response);
+        System.out.println("===================");
+    }
+
+    // 响应DTO
+    public static class GetUnreadCountResponse {
+        private boolean success;
+        private String message;
+        private int unreadCount;
+
+        public GetUnreadCountResponse(boolean success, String message, int unreadCount) {
+            this.success = success;
+            this.message = message;
+            this.unreadCount = unreadCount;
+        }
+
+        public boolean isSuccess() { return success; }
+        public void setSuccess(boolean success) { this.success = success; }
+
+        public String getMessage() { return message; }
+        public void setMessage(String message) { this.message = message; }
+
+        public int getUnreadCount() { return unreadCount; }
+        public void setUnreadCount(int unreadCount) { this.unreadCount = unreadCount; }
+    }
+
+    @GetMapping("/unread-count")
+    public ResponseEntity<GetUnreadCountResponse> getUnreadCount(
+            @RequestHeader(value = "Authorization", required = false) String authHeader) {
+
+        try {
+            // 打印接收到的请求
+            printRequest("获取未读通知数量");
+
+            // 1. 验证认证信息
+            if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new GetUnreadCountResponse(false, "请先登录", 0)
+                );
+            }
+
+            String token = authHeader.substring(7);
+
+            // 2. 根据token获取用户ID
+            String getUserSql = "SELECT user_id FROM user_sessions WHERE access_token = ? AND expires_at > NOW()";
+            List<Map<String, Object>> sessions = jdbcTemplate.queryForList(getUserSql, token);
+
+            if (sessions.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new GetUnreadCountResponse(false, "登录已过期，请重新登录", 0)
+                );
+            }
+
+            Map<String, Object> session = sessions.get(0);
+            Integer userId = (Integer) session.get("user_id");
+
+            // 3. 查询未读通知数量
+            String countSql = "SELECT COUNT(*) as unread_count FROM notifications WHERE user_id = ? AND is_read = false";
+            Map<String, Object> countResult = jdbcTemplate.queryForMap(countSql, userId);
+            long unreadCount = ((Number) countResult.get("unread_count")).longValue();
+
+            printQueryResult("未读通知数量: " + unreadCount);
+
+            // 4. 创建响应
+            GetUnreadCountResponse response = new GetUnreadCountResponse(
+                    true,
+                    "获取未读通知数量成功",
+                    (int) unreadCount
+            );
+
+            // 打印返回数据
+            printResponse(response);
+
+            return ResponseEntity.ok(response);
+
+        } catch (Exception e) {
+            System.err.println("获取未读通知数量过程中发生错误: " + e.getMessage());
+            e.printStackTrace();
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                    new GetUnreadCountResponse(false, "服务器内部错误: " + e.getMessage(), 0)
+            );
+        }
+    }
+}
+--- 结束文件: NotificationGetUnreadCount.java ---
+
+--- 开始文件: NotificationMarkAllAsRead.java ---
+package com.vue.readingapp.notifications;
+
+import org.springframework.web.bind.annotation.*;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.beans.factory.annotation.Autowired;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.*;
+
+@RestController
+@RequestMapping("/api/v1/notifications")
+public class NotificationMarkAllAsRead {
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    // 打印接收到的请求
+    private void printRequest(Object request) {
+        System.out.println("=== 收到标记所有通知为已读请求 ===");
+        System.out.println("请求数据: " + request);
+        System.out.println("=============================");
+    }
+
+    // 打印查询结果
+    private void printQueryResult(Object result) {
+        System.out.println("=== 数据库查询结果 ===");
+        System.out.println("查询结果: " + result);
+        System.out.println("===================");
+    }
+
+    // 打印返回数据
+    private void printResponse(Object response) {
+        System.out.println("=== 准备返回的响应 ===");
+        System.out.println("响应数据: " + response);
+        System.out.println("===================");
+    }
+
+    // 响应DTO
+    public static class MarkAllAsReadResponse {
+        private boolean success;
+        private String message;
+        private int markedCount;
+        private String timestamp;
+
+        public MarkAllAsReadResponse(boolean success, String message, int markedCount, String timestamp) {
+            this.success = success;
+            this.message = message;
+            this.markedCount = markedCount;
+            this.timestamp = timestamp;
+        }
+
+        public boolean isSuccess() { return success; }
+        public void setSuccess(boolean success) { this.success = success; }
+
+        public String getMessage() { return message; }
+        public void setMessage(String message) { this.message = message; }
+
+        public int getMarkedCount() { return markedCount; }
+        public void setMarkedCount(int markedCount) { this.markedCount = markedCount; }
+
+        public String getTimestamp() { return timestamp; }
+        public void setTimestamp(String timestamp) { this.timestamp = timestamp; }
+    }
+
+    @PutMapping("/read-all")
+    public ResponseEntity<MarkAllAsReadResponse> markAllAsRead(
+            @RequestHeader(value = "Authorization", required = false) String authHeader) {
+
+        try {
+            // 打印接收到的请求
+            printRequest("标记所有通知为已读");
+
+            // 1. 验证认证信息
+            if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new MarkAllAsReadResponse(false, "请先登录", 0, null)
+                );
+            }
+
+            String token = authHeader.substring(7);
+
+            // 2. 根据token获取用户ID
+            String getUserSql = "SELECT user_id FROM user_sessions WHERE access_token = ? AND expires_at > NOW()";
+            List<Map<String, Object>> sessions = jdbcTemplate.queryForList(getUserSql, token);
+
+            if (sessions.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new MarkAllAsReadResponse(false, "登录已过期，请重新登录", 0, null)
+                );
+            }
+
+            Map<String, Object> session = sessions.get(0);
+            Integer userId = (Integer) session.get("user_id");
+
+            // 3. 查询当前用户有多少未读通知
+            String countUnreadSql = "SELECT COUNT(*) as unread_count FROM notifications WHERE user_id = ? AND is_read = false";
+            Map<String, Object> countResult = jdbcTemplate.queryForMap(countUnreadSql, userId);
+            long unreadCount = ((Number) countResult.get("unread_count")).longValue();
+
+            printQueryResult("未读通知数量: " + unreadCount);
+
+            if (unreadCount == 0) {
+                return ResponseEntity.ok(
+                        new MarkAllAsReadResponse(true, "没有未读通知", 0, null)
+                );
+            }
+
+            // 4. 更新所有未读通知为已读状态
+            LocalDateTime now = LocalDateTime.now();
+            DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss");
+            String formattedNow = now.format(formatter) + "Z";
+
+            String updateSql = "UPDATE notifications SET is_read = true, read_at = ? WHERE user_id = ? AND is_read = false";
+            int updatedRows = jdbcTemplate.update(updateSql, now, userId);
+
+            printQueryResult("更新行数: " + updatedRows);
+
+            if (updatedRows > 0) {
+                MarkAllAsReadResponse response = new MarkAllAsReadResponse(
+                        true,
+                        "所有通知已标记为已读",
+                        updatedRows,
+                        formattedNow
+                );
+
+                // 打印返回数据
+                printResponse(response);
+
+                return ResponseEntity.ok(response);
+            } else {
+                return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                        new MarkAllAsReadResponse(false, "更新通知状态失败", 0, null)
+                );
+            }
+
+        } catch (Exception e) {
+            System.err.println("标记所有通知为已读过程中发生错误: " + e.getMessage());
+            e.printStackTrace();
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                    new MarkAllAsReadResponse(false, "服务器内部错误: " + e.getMessage(), 0, null)
+            );
+        }
+    }
+}
+--- 结束文件: NotificationMarkAllAsRead.java ---
+
+--- 开始文件: NotificationMarkAsRead.java ---
+package com.vue.readingapp.notifications;
+
+import org.springframework.web.bind.annotation.*;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.beans.factory.annotation.Autowired;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.*;
+
+@RestController
+@RequestMapping("/api/v1/notifications")
+public class NotificationMarkAsRead {
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    // 打印接收到的请求
+    private void printRequest(Object request) {
+        System.out.println("=== 收到标记通知为已读请求 ===");
+        System.out.println("请求数据: " + request);
+        System.out.println("==========================");
+    }
+
+    // 打印查询结果
+    private void printQueryResult(Object result) {
+        System.out.println("=== 数据库查询结果 ===");
+        System.out.println("查询结果: " + result);
+        System.out.println("===================");
+    }
+
+    // 打印返回数据
+    private void printResponse(Object response) {
+        System.out.println("=== 准备返回的响应 ===");
+        System.out.println("响应数据: " + response);
+        System.out.println("===================");
+    }
+
+    // 请求DTO
+    public static class MarkAsReadRequest {
+        private String notificationId;
+
+        public String getNotificationId() { return notificationId; }
+        public void setNotificationId(String notificationId) { this.notificationId = notificationId; }
+    }
+
+    // 响应DTO
+    public static class MarkAsReadResponse {
+        private boolean success;
+        private String message;
+        private String notificationId;
+        private String readAt;
+
+        public MarkAsReadResponse(boolean success, String message, String notificationId, String readAt) {
+            this.success = success;
+            this.message = message;
+            this.notificationId = notificationId;
+            this.readAt = readAt;
+        }
+
+        public boolean isSuccess() { return success; }
+        public void setSuccess(boolean success) { this.success = success; }
+
+        public String getMessage() { return message; }
+        public void setMessage(String message) { this.message = message; }
+
+        public String getNotificationId() { return notificationId; }
+        public void setNotificationId(String notificationId) { this.notificationId = notificationId; }
+
+        public String getReadAt() { return readAt; }
+        public void setReadAt(String readAt) { this.readAt = readAt; }
+    }
+
+    @PutMapping("/{notificationId}/read")
+    public ResponseEntity<MarkAsReadResponse> markAsRead(
+            @RequestHeader(value = "Authorization", required = false) String authHeader,
+            @PathVariable String notificationId) {
+
+        try {
+            // 创建请求对象
+            MarkAsReadRequest request = new MarkAsReadRequest();
+            request.setNotificationId(notificationId);
+
+            // 打印接收到的请求
+            printRequest(request);
+
+            // 1. 验证认证信息
+            if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new MarkAsReadResponse(false, "请先登录", notificationId, null)
+                );
+            }
+
+            String token = authHeader.substring(7);
+
+            // 2. 根据token获取用户ID
+            String getUserSql = "SELECT user_id FROM user_sessions WHERE access_token = ? AND expires_at > NOW()";
+            List<Map<String, Object>> sessions = jdbcTemplate.queryForList(getUserSql, token);
+
+            if (sessions.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new MarkAsReadResponse(false, "登录已过期，请重新登录", notificationId, null)
+                );
+            }
+
+            Map<String, Object> session = sessions.get(0);
+            Integer userId = (Integer) session.get("user_id");
+
+            // 3. 提取notificationId的数字部分
+            Integer notificationIdInt = null;
+            try {
+                if (notificationId.startsWith("notif_")) {
+                    notificationIdInt = Integer.parseInt(notificationId.substring(6));
+                } else {
+                    notificationIdInt = Integer.parseInt(notificationId);
+                }
+            } catch (NumberFormatException e) {
+                return ResponseEntity.badRequest().body(
+                        new MarkAsReadResponse(false, "通知ID格式错误", notificationId, null)
+                );
+            }
+
+            // 4. 验证通知是否存在且属于当前用户
+            String checkNotificationSql = "SELECT notification_id FROM notifications WHERE notification_id = ? AND user_id = ?";
+            List<Map<String, Object>> notifications = jdbcTemplate.queryForList(checkNotificationSql, notificationIdInt, userId);
+
+            if (notifications.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.NOT_FOUND).body(
+                        new MarkAsReadResponse(false, "通知不存在或无权访问", notificationId, null)
+                );
+            }
+
+            // 5. 检查通知是否已经是已读状态
+            String checkReadStatusSql = "SELECT is_read FROM notifications WHERE notification_id = ?";
+            List<Map<String, Object>> readStatus = jdbcTemplate.queryForList(checkReadStatusSql, notificationIdInt);
+
+            if (!readStatus.isEmpty()) {
+                Boolean isRead = (Boolean) readStatus.get(0).get("is_read");
+                if (isRead != null && isRead) {
+                    return ResponseEntity.ok(
+                            new MarkAsReadResponse(true, "通知已经是已读状态", notificationId, null)
+                    );
+                }
+            }
+
+            // 6. 更新通知为已读状态
+            LocalDateTime now = LocalDateTime.now();
+            DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss");
+            String formattedNow = now.format(formatter) + "Z";
+
+            String updateSql = "UPDATE notifications SET is_read = true, read_at = ? WHERE notification_id = ?";
+            int updatedRows = jdbcTemplate.update(updateSql, now, notificationIdInt);
+
+            printQueryResult("更新行数: " + updatedRows);
+
+            if (updatedRows > 0) {
+                MarkAsReadResponse response = new MarkAsReadResponse(
+                        true,
+                        "通知已标记为已读",
+                        notificationId,
+                        formattedNow
+                );
+
+                // 打印返回数据
+                printResponse(response);
+
+                return ResponseEntity.ok(response);
+            } else {
+                return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                        new MarkAsReadResponse(false, "更新通知状态失败", notificationId, null)
+                );
+            }
+
+        } catch (Exception e) {
+            System.err.println("标记通知为已读过程中发生错误: " + e.getMessage());
+            e.printStackTrace();
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                    new MarkAsReadResponse(false, "服务器内部错误: " + e.getMessage(), notificationId, null)
+            );
+        }
+    }
+}
+--- 结束文件: NotificationMarkAsRead.java ---
+
+--- 开始文件: NotificationSubscribe.java ---
+package com.vue.readingapp.notifications;
+
+import org.springframework.web.bind.annotation.*;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.beans.factory.annotation.Autowired;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.*;
+
+@RestController
+@RequestMapping("/api/v1/notifications")
+public class NotificationSubscribe {
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    // 打印接收到的请求
+    private void printRequest(Object request) {
+        System.out.println("=== 收到订阅通知频道请求 ===");
+        System.out.println("请求数据: " + request);
+        System.out.println("=========================");
+    }
+
+    // 打印查询结果
+    private void printQueryResult(Object result) {
+        System.out.println("=== 数据库查询结果 ===");
+        System.out.println("查询结果: " + result);
+        System.out.println("===================");
+    }
+
+    // 打印返回数据
+    private void printResponse(Object response) {
+        System.out.println("=== 准备返回的响应 ===");
+        System.out.println("响应数据: " + response);
+        System.out.println("===================");
+    }
+
+    // 请求DTO
+    public static class SubscribeRequest {
+        private String channel;
+        private String deviceToken;
+
+        public String getChannel() { return channel; }
+        public void setChannel(String channel) { this.channel = channel; }
+
+        public String getDeviceToken() { return deviceToken; }
+        public void setDeviceToken(String deviceToken) { this.deviceToken = deviceToken; }
+    }
+
+    // 响应DTO
+    public static class SubscribeResponse {
+        private boolean success;
+        private String message;
+        private String channel;
+        private String subscribedAt;
+
+        public SubscribeResponse(boolean success, String message, String channel, String subscribedAt) {
+            this.success = success;
+            this.message = message;
+            this.channel = channel;
+            this.subscribedAt = subscribedAt;
+        }
+
+        public boolean isSuccess() { return success; }
+        public void setSuccess(boolean success) { this.success = success; }
+
+        public String getMessage() { return message; }
+        public void setMessage(String message) { this.message = message; }
+
+        public String getChannel() { return channel; }
+        public void setChannel(String channel) { this.channel = channel; }
+
+        public String getSubscribedAt() { return subscribedAt; }
+        public void setSubscribedAt(String subscribedAt) { this.subscribedAt = subscribedAt; }
+    }
+
+    @PostMapping("/subscribe")
+    public ResponseEntity<SubscribeResponse> subscribe(
+            @RequestHeader(value = "Authorization", required = false) String authHeader,
+            @RequestBody SubscribeRequest request) {
+
+        try {
+            // 打印接收到的请求
+            printRequest(request);
+
+            // 1. 验证认证信息
+            if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new SubscribeResponse(false, "请先登录", null, null)
+                );
+            }
+
+            String token = authHeader.substring(7);
+
+            // 2. 根据token获取用户ID
+            String getUserSql = "SELECT user_id FROM user_sessions WHERE access_token = ? AND expires_at > NOW()";
+            List<Map<String, Object>> sessions = jdbcTemplate.queryForList(getUserSql, token);
+
+            if (sessions.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new SubscribeResponse(false, "登录已过期，请重新登录", null, null)
+                );
+            }
+
+            Map<String, Object> session = sessions.get(0);
+            Integer userId = (Integer) session.get("user_id");
+
+            // 3. 验证请求数据
+            if (request.getChannel() == null || request.getChannel().trim().isEmpty()) {
+                return ResponseEntity.badRequest().body(
+                        new SubscribeResponse(false, "频道不能为空", null, null)
+                );
+            }
+
+            // 验证频道类型
+            String channel = request.getChannel().toLowerCase();
+            if (!channel.equals("push") && !channel.equals("email") && !channel.equals("desktop")) {
+                return ResponseEntity.badRequest().body(
+                        new SubscribeResponse(false, "不支持的频道类型，支持的频道：push, email, desktop", null, null)
+                );
+            }
+
+            // 如果是push频道，需要设备令牌
+            if (channel.equals("push") && (request.getDeviceToken() == null || request.getDeviceToken().trim().isEmpty())) {
+                return ResponseEntity.badRequest().body(
+                        new SubscribeResponse(false, "push频道需要设备令牌", null, null)
+                );
+            }
+
+            // 4. 检查是否已订阅
+            LocalDateTime now = LocalDateTime.now();
+            DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss");
+            String formattedNow = now.format(formatter) + "Z";
+
+            String checkSql = "SELECT COUNT(*) as count FROM notification_subscriptions WHERE user_id = ? AND channel = ?";
+            Map<String, Object> checkResult = jdbcTemplate.queryForMap(checkSql, userId, channel);
+            long count = ((Number) checkResult.get("count")).longValue();
+
+            int updatedRows;
+
+            if (count > 0) {
+                // 更新现有订阅
+                String updateSql = "UPDATE notification_subscriptions SET device_token = ?, is_active = true, updated_at = ? WHERE user_id = ? AND channel = ?";
+                updatedRows = jdbcTemplate.update(updateSql,
+                        request.getDeviceToken(),
+                        now,
+                        userId,
+                        channel
+                );
+            } else {
+                // 插入新订阅
+                String insertSql = "INSERT INTO notification_subscriptions (user_id, channel, device_token, is_active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)";
+                updatedRows = jdbcTemplate.update(insertSql,
+                        userId,
+                        channel,
+                        request.getDeviceToken(),
+                        true,
+                        now,
+                        now
+                );
+            }
+
+            printQueryResult("更新行数: " + updatedRows);
+
+            if (updatedRows > 0) {
+                // 5. 更新通知设置中的对应频道
+                String updateSettingsSql = "UPDATE notification_settings SET ";
+                if (channel.equals("push")) {
+                    updateSettingsSql += "push_notifications = true";
+                } else if (channel.equals("email")) {
+                    updateSettingsSql += "email_notifications = true";
+                } else if (channel.equals("desktop")) {
+                    updateSettingsSql += "desktop_notifications = true";
+                }
+                updateSettingsSql += ", updated_at = ? WHERE user_id = ?";
+
+                jdbcTemplate.update(updateSettingsSql, now, userId);
+
+                // 6. 创建响应
+                SubscribeResponse response = new SubscribeResponse(
+                        true,
+                        "订阅通知频道成功",
+                        channel,
+                        formattedNow
+                );
+
+                // 打印返回数据
+                printResponse(response);
+
+                return ResponseEntity.ok(response);
+            } else {
+                return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                        new SubscribeResponse(false, "订阅通知频道失败", null, null)
+                );
+            }
+
+        } catch (Exception e) {
+            System.err.println("订阅通知频道过程中发生错误: " + e.getMessage());
+            e.printStackTrace();
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                    new SubscribeResponse(false, "服务器内部错误: " + e.getMessage(), null, null)
+            );
+        }
+    }
+}
+--- 结束文件: NotificationSubscribe.java ---
+
+--- 开始文件: NotificationTest.java ---
+package com.vue.readingapp.notifications;
+
+import org.springframework.web.bind.annotation.*;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.beans.factory.annotation.Autowired;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.time.Duration;
+import java.util.*;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+@RestController
+@RequestMapping("/api/v1/notifications")
+public class NotificationTest {
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    private ObjectMapper objectMapper = new ObjectMapper();
+
+    // 打印接收到的请求
+    private void printRequest(Object request) {
+        System.out.println("=== 收到测试通知发送请求 ===");
+        System.out.println("请求数据: " + request);
+        System.out.println("=========================");
+    }
+
+    // 打印查询结果
+    private void printQueryResult(Object result) {
+        System.out.println("=== 数据库查询结果 ===");
+        System.out.println("查询结果: " + result);
+        System.out.println("===================");
+    }
+
+    // 打印返回数据
+    private void printResponse(Object response) {
+        System.out.println("=== 准备返回的响应 ===");
+        System.out.println("响应数据: " + response);
+        System.out.println("===================");
+    }
+
+    // 计算相对时间
+    private String calculateRelativeTime(LocalDateTime dateTime) {
+        if (dateTime == null) {
+            return "未知时间";
+        }
+
+        LocalDateTime now = LocalDateTime.now();
+        Duration duration = Duration.between(dateTime, now);
+
+        long seconds = duration.getSeconds();
+        long minutes = seconds / 60;
+        long hours = minutes / 60;
+        long days = hours / 24;
+        long weeks = days / 7;
+        long months = days / 30;
+        long years = days / 365;
+
+        if (seconds < 60) {
+            return "刚刚";
+        } else if (minutes < 60) {
+            return minutes + "分钟前";
+        } else if (hours < 24) {
+            return hours + "小时前";
+        } else if (days < 7) {
+            return days + "天前";
+        } else if (weeks < 4) {
+            return weeks + "周前";
+        } else if (months < 12) {
+            return months + "个月前";
+        } else {
+            return years + "年前";
+        }
+    }
+
+    // 请求DTO
+    public static class TestNotificationRequest {
+        private String type = "test";
+        private String title = "测试通知";
+        private String message = "这是一条测试通知";
+        private String icon = "/icons/test.png";
+        private String targetType = "test";
+        private String targetId = "test_123";
+
+        public String getType() { return type; }
+        public void setType(String type) { this.type = type; }
+
+        public String getTitle() { return title; }
+        public void setTitle(String title) { this.title = title; }
+
+        public String getMessage() { return message; }
+        public void setMessage(String message) { this.message = message; }
+
+        public String getIcon() { return icon; }
+        public void setIcon(String icon) { this.icon = icon; }
+
+        public String getTargetType() { return targetType; }
+        public void setTargetType(String targetType) { this.targetType = targetType; }
+
+        public String getTargetId() { return targetId; }
+        public void setTargetId(String targetId) { this.targetId = targetId; }
+    }
+
+    // 响应DTO
+    public static class TestNotificationResponse {
+        private boolean success;
+        private String message;
+        private NotificationData notification;
+
+        public TestNotificationResponse(boolean success, String message, NotificationData notification) {
+            this.success = success;
+            this.message = message;
+            this.notification = notification;
+        }
+
+        public boolean isSuccess() { return success; }
+        public void setSuccess(boolean success) { this.success = success; }
+
+        public String getMessage() { return message; }
+        public void setMessage(String message) { this.message = message; }
+
+        public NotificationData getNotification() { return notification; }
+        public void setNotification(NotificationData notification) { this.notification = notification; }
+    }
+
+    public static class NotificationData {
+        private String id;
+        private String type;
+        private String title;
+        private String message;
+        private String icon;
+        private String image;
+        private boolean read;
+        private String readAt;
+        private String createdAt;
+        private String relativeTime;
+        private String actionUrl;
+        private String targetType;
+        private String targetId;
+        private Map<String, Object> metadata;
+
+        public NotificationData() {
+            this.metadata = new HashMap<>();
+        }
+
+        public String getId() { return id; }
+        public void setId(String id) { this.id = id; }
+
+        public String getType() { return type; }
+        public void setType(String type) { this.type = type; }
+
+        public String getTitle() { return title; }
+        public void setTitle(String title) { this.title = title; }
+
+        public String getMessage() { return message; }
+        public void setMessage(String message) { this.message = message; }
+
+        public String getIcon() { return icon; }
+        public void setIcon(String icon) { this.icon = icon; }
+
+        public String getImage() { return image; }
+        public void setImage(String image) { this.image = image; }
+
+        public boolean isRead() { return read; }
+        public void setRead(boolean read) { this.read = read; }
+
+        public String getReadAt() { return readAt; }
+        public void setReadAt(String readAt) { this.readAt = readAt; }
+
+        public String getCreatedAt() { return createdAt; }
+        public void setCreatedAt(String createdAt) { this.createdAt = createdAt; }
+
+        public String getRelativeTime() { return relativeTime; }
+        public void setRelativeTime(String relativeTime) { this.relativeTime = relativeTime; }
+
+        public String getActionUrl() { return actionUrl; }
+        public void setActionUrl(String actionUrl) { this.actionUrl = actionUrl; }
+
+        public String getTargetType() { return targetType; }
+        public void setTargetType(String targetType) { this.targetType = targetType; }
+
+        public String getTargetId() { return targetId; }
+        public void setTargetId(String targetId) { this.targetId = targetId; }
+
+        public Map<String, Object> getMetadata() { return metadata; }
+        public void setMetadata(Map<String, Object> metadata) { this.metadata = metadata; }
+    }
+
+    @PostMapping("/test")
+    public ResponseEntity<TestNotificationResponse> testNotification(
+            @RequestHeader(value = "Authorization", required = false) String authHeader,
+            @RequestBody TestNotificationRequest request) {
+
+        try {
+            // 打印接收到的请求
+            printRequest(request);
+
+            // 1. 验证认证信息
+            if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new TestNotificationResponse(false, "请先登录", null)
+                );
+            }
+
+            String token = authHeader.substring(7);
+
+            // 2. 根据token获取用户ID
+            String getUserSql = "SELECT user_id FROM user_sessions WHERE access_token = ? AND expires_at > NOW()";
+            List<Map<String, Object>> sessions = jdbcTemplate.queryForList(getUserSql, token);
+
+            if (sessions.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new TestNotificationResponse(false, "登录已过期，请重新登录", null)
+                );
+            }
+
+            Map<String, Object> session = sessions.get(0);
+            Integer userId = (Integer) session.get("user_id");
+
+            // 3. 准备测试通知数据
+            LocalDateTime now = LocalDateTime.now();
+            DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss");
+            String formattedNow = now.format(formatter) + "Z";
+
+            // 创建测试metadata
+            Map<String, Object> metadata = new HashMap<>();
+            metadata.put("test", true);
+            metadata.put("testTime", formattedNow);
+            metadata.put("purpose", "测试通知功能是否正常");
+
+            String metadataJson = objectMapper.writeValueAsString(metadata);
+
+            // 4. 插入测试通知到数据库
+            String insertSql = "INSERT INTO notifications (user_id, type, title, message, icon_url, action_url, target_type, target_id, metadata, is_read, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+
+            int insertedRows = jdbcTemplate.update(insertSql,
+                    userId,
+                    request.getType(),
+                    request.getTitle(),
+                    request.getMessage(),
+                    request.getIcon(),
+                    "/test",
+                    request.getTargetType(),
+                    request.getTargetId(),
+                    metadataJson,
+                    false, // is_read默认为false
+                    now
+            );
+
+            printQueryResult("插入行数: " + insertedRows);
+
+            if (insertedRows > 0) {
+                // 5. 获取刚插入的通知ID
+                String getLastIdSql = "SELECT LAST_INSERT_ID() as last_id";
+                Map<String, Object> lastIdResult = jdbcTemplate.queryForMap(getLastIdSql);
+                Integer notificationId = ((Number) lastIdResult.get("last_id")).intValue();
+
+                // 6. 创建响应数据
+                NotificationData notification = new NotificationData();
+                notification.setId("notif_" + notificationId);
+                notification.setType(request.getType());
+                notification.setTitle(request.getTitle());
+                notification.setMessage(request.getMessage());
+                notification.setIcon(request.getIcon());
+                notification.setImage(null);
+                notification.setActionUrl("/test");
+                notification.setTargetType(request.getTargetType());
+                notification.setTargetId(request.getTargetId());
+                notification.setMetadata(metadata);
+                notification.setRead(false);
+                notification.setReadAt(null);
+                notification.setCreatedAt(formattedNow);
+                notification.setRelativeTime(calculateRelativeTime(now));
+
+                // 7. 创建响应
+                TestNotificationResponse response = new TestNotificationResponse(
+                        true,
+                        "测试通知发送成功",
+                        notification
+                );
+
+                // 打印返回数据
+                printResponse(response);
+
+                return ResponseEntity.ok(response);
+            } else {
+                return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                        new TestNotificationResponse(false, "测试通知发送失败", null)
+                );
+            }
+
+        } catch (Exception e) {
+            System.err.println("测试通知发送过程中发生错误: " + e.getMessage());
+            e.printStackTrace();
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                    new TestNotificationResponse(false, "服务器内部错误: " + e.getMessage(), null)
+            );
+        }
+    }
+}
+--- 结束文件: NotificationTest.java ---
+
+--- 开始文件: NotificationUnsubscribe.java ---
+package com.vue.readingapp.notifications;
+
+import org.springframework.web.bind.annotation.*;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.beans.factory.annotation.Autowired;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.*;
+
+@RestController
+@RequestMapping("/api/v1/notifications")
+public class NotificationUnsubscribe {
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    // 打印接收到的请求
+    private void printRequest(Object request) {
+        System.out.println("=== 收到取消订阅通知频道请求 ===");
+        System.out.println("请求数据: " + request);
+        System.out.println("=============================");
+    }
+
+    // 打印查询结果
+    private void printQueryResult(Object result) {
+        System.out.println("=== 数据库查询结果 ===");
+        System.out.println("查询结果: " + result);
+        System.out.println("===================");
+    }
+
+    // 打印返回数据
+    private void printResponse(Object response) {
+        System.out.println("=== 准备返回的响应 ===");
+        System.out.println("响应数据: " + response);
+        System.out.println("===================");
+    }
+
+    // 请求DTO
+    public static class UnsubscribeRequest {
+        private String channel;
+
+        public String getChannel() { return channel; }
+        public void setChannel(String channel) { this.channel = channel; }
+    }
+
+    // 响应DTO
+    public static class UnsubscribeResponse {
+        private boolean success;
+        private String message;
+        private String channel;
+        private String unsubscribedAt;
+
+        public UnsubscribeResponse(boolean success, String message, String channel, String unsubscribedAt) {
+            this.success = success;
+            this.message = message;
+            this.channel = channel;
+            this.unsubscribedAt = unsubscribedAt;
+        }
+
+        public boolean isSuccess() { return success; }
+        public void setSuccess(boolean success) { this.success = success; }
+
+        public String getMessage() { return message; }
+        public void setMessage(String message) { this.message = message; }
+
+        public String getChannel() { return channel; }
+        public void setChannel(String channel) { this.channel = channel; }
+
+        public String getUnsubscribedAt() { return unsubscribedAt; }
+        public void setUnsubscribedAt(String unsubscribedAt) { this.unsubscribedAt = unsubscribedAt; }
+    }
+
+    @DeleteMapping("/unsubscribe")
+    public ResponseEntity<UnsubscribeResponse> unsubscribe(
+            @RequestHeader(value = "Authorization", required = false) String authHeader,
+            @RequestBody UnsubscribeRequest request) {
+
+        try {
+            // 打印接收到的请求
+            printRequest(request);
+
+            // 1. 验证认证信息
+            if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new UnsubscribeResponse(false, "请先登录", null, null)
+                );
+            }
+
+            String token = authHeader.substring(7);
+
+            // 2. 根据token获取用户ID
+            String getUserSql = "SELECT user_id FROM user_sessions WHERE access_token = ? AND expires_at > NOW()";
+            List<Map<String, Object>> sessions = jdbcTemplate.queryForList(getUserSql, token);
+
+            if (sessions.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new UnsubscribeResponse(false, "登录已过期，请重新登录", null, null)
+                );
+            }
+
+            Map<String, Object> session = sessions.get(0);
+            Integer userId = (Integer) session.get("user_id");
+
+            // 3. 验证请求数据
+            if (request.getChannel() == null || request.getChannel().trim().isEmpty()) {
+                return ResponseEntity.badRequest().body(
+                        new UnsubscribeResponse(false, "频道不能为空", null, null)
+                );
+            }
+
+            // 验证频道类型
+            String channel = request.getChannel().toLowerCase();
+            if (!channel.equals("push") && !channel.equals("email") && !channel.equals("desktop")) {
+                return ResponseEntity.badRequest().body(
+                        new UnsubscribeResponse(false, "不支持的频道类型，支持的频道：push, email, desktop", null, null)
+                );
+            }
+
+            // 4. 检查是否已订阅
+            String checkSql = "SELECT COUNT(*) as count FROM notification_subscriptions WHERE user_id = ? AND channel = ? AND is_active = true";
+            Map<String, Object> checkResult = jdbcTemplate.queryForMap(checkSql, userId, channel);
+            long count = ((Number) checkResult.get("count")).longValue();
+
+            if (count == 0) {
+                return ResponseEntity.ok(
+                        new UnsubscribeResponse(true, "您尚未订阅该频道", channel, null)
+                );
+            }
+
+            // 5. 取消订阅
+            LocalDateTime now = LocalDateTime.now();
+            DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss");
+            String formattedNow = now.format(formatter) + "Z";
+
+            String updateSql = "UPDATE notification_subscriptions SET is_active = false, updated_at = ? WHERE user_id = ? AND channel = ?";
+            int updatedRows = jdbcTemplate.update(updateSql, now, userId, channel);
+
+            printQueryResult("更新行数: " + updatedRows);
+
+            if (updatedRows > 0) {
+                // 6. 更新通知设置中的对应频道
+                String updateSettingsSql = "UPDATE notification_settings SET ";
+                if (channel.equals("push")) {
+                    updateSettingsSql += "push_notifications = false";
+                } else if (channel.equals("email")) {
+                    updateSettingsSql += "email_notifications = false";
+                } else if (channel.equals("desktop")) {
+                    updateSettingsSql += "desktop_notifications = false";
+                }
+                updateSettingsSql += ", updated_at = ? WHERE user_id = ?";
+
+                jdbcTemplate.update(updateSettingsSql, now, userId);
+
+                // 7. 创建响应
+                UnsubscribeResponse response = new UnsubscribeResponse(
+                        true,
+                        "取消订阅通知频道成功",
+                        channel,
+                        formattedNow
+                );
+
+                // 打印返回数据
+                printResponse(response);
+
+                return ResponseEntity.ok(response);
+            } else {
+                return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                        new UnsubscribeResponse(false, "取消订阅通知频道失败", null, null)
+                );
+            }
+
+        } catch (Exception e) {
+            System.err.println("取消订阅通知频道过程中发生错误: " + e.getMessage());
+            e.printStackTrace();
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                    new UnsubscribeResponse(false, "服务器内部错误: " + e.getMessage(), null, null)
+            );
+        }
+    }
+}
+--- 结束文件: NotificationUnsubscribe.java ---
+
+--- 开始文件: NotificationUpdateSettings.java ---
+package com.vue.readingapp.notifications;
+
+import org.springframework.web.bind.annotation.*;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.beans.factory.annotation.Autowired;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.*;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+@RestController
+@RequestMapping("/api/v1/notifications")
+public class NotificationUpdateSettings {
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    private ObjectMapper objectMapper = new ObjectMapper();
+
+    // 打印接收到的请求
+    private void printRequest(Object request) {
+        System.out.println("=== 收到更新通知设置请求 ===");
+        System.out.println("请求数据: " + request);
+        System.out.println("=========================");
+    }
+
+    // 打印查询结果
+    private void printQueryResult(Object result) {
+        System.out.println("=== 数据库查询结果 ===");
+        System.out.println("查询结果: " + result);
+        System.out.println("===================");
+    }
+
+    // 打印返回数据
+    private void printResponse(Object response) {
+        System.out.println("=== 准备返回的响应 ===");
+        System.out.println("响应数据: " + response);
+        System.out.println("===================");
+    }
+
+    // 请求DTO
+    public static class UpdateSettingsRequest {
+        private Boolean email;
+        private Boolean push;
+        private Boolean desktop;
+        private String frequency;
+        private QuietHoursData quietHours;
+        private NotificationTypesData types;
+
+        public Boolean getEmail() { return email; }
+        public void setEmail(Boolean email) { this.email = email; }
+
+        public Boolean getPush() { return push; }
+        public void setPush(Boolean push) { this.push = push; }
+
+        public Boolean getDesktop() { return desktop; }
+        public void setDesktop(Boolean desktop) { this.desktop = desktop; }
+
+        public String getFrequency() { return frequency; }
+        public void setFrequency(String frequency) { this.frequency = frequency; }
+
+        public QuietHoursData getQuietHours() { return quietHours; }
+        public void setQuietHours(QuietHoursData quietHours) { this.quietHours = quietHours; }
+
+        public NotificationTypesData getTypes() { return types; }
+        public void setTypes(NotificationTypesData types) { this.types = types; }
+    }
+
+    public static class QuietHoursData {
+        private Boolean enabled;
+        private String start;
+        private String end;
+
+        public Boolean getEnabled() { return enabled; }
+        public void setEnabled(Boolean enabled) { this.enabled = enabled; }
+
+        public String getStart() { return start; }
+        public void setStart(String start) { this.start = start; }
+
+        public String getEnd() { return end; }
+        public void setEnd(String end) { this.end = end; }
+    }
+
+    public static class NotificationTypesData {
+        private Boolean document_shared;
+        private Boolean review_reminder;
+        private Boolean achievement_unlocked;
+        private Boolean system_update;
+        private Boolean promotional;
+
+        public Boolean getDocument_shared() { return document_shared; }
+        public void setDocument_shared(Boolean document_shared) { this.document_shared = document_shared; }
+
+        public Boolean getReview_reminder() { return review_reminder; }
+        public void setReview_reminder(Boolean review_reminder) { this.review_reminder = review_reminder; }
+
+        public Boolean getAchievement_unlocked() { return achievement_unlocked; }
+        public void setAchievement_unlocked(Boolean achievement_unlocked) { this.achievement_unlocked = achievement_unlocked; }
+
+        public Boolean getSystem_update() { return system_update; }
+        public void setSystem_update(Boolean system_update) { this.system_update = system_update; }
+
+        public Boolean getPromotional() { return promotional; }
+        public void setPromotional(Boolean promotional) { this.promotional = promotional; }
+    }
+
+    // 响应DTO
+    public static class UpdateSettingsResponse {
+        private boolean success;
+        private String message;
+        private NotificationSettingsData settings;
+
+        public UpdateSettingsResponse(boolean success, String message, NotificationSettingsData settings) {
+            this.success = success;
+            this.message = message;
+            this.settings = settings;
+        }
+
+        public boolean isSuccess() { return success; }
+        public void setSuccess(boolean success) { this.success = success; }
+
+        public String getMessage() { return message; }
+        public void setMessage(String message) { this.message = message; }
+
+        public NotificationSettingsData getSettings() { return settings; }
+        public void setSettings(NotificationSettingsData settings) { this.settings = settings; }
+    }
+
+    public static class NotificationSettingsData {
+        private boolean email;
+        private boolean push;
+        private boolean desktop;
+        private String frequency;
+        private QuietHoursResponseData quietHours;
+        private NotificationTypesResponseData types;
+        private String updatedAt;
+
+        public boolean isEmail() { return email; }
+        public void setEmail(boolean email) { this.email = email; }
+
+        public boolean isPush() { return push; }
+        public void setPush(boolean push) { this.push = push; }
+
+        public boolean isDesktop() { return desktop; }
+        public void setDesktop(boolean desktop) { this.desktop = desktop; }
+
+        public String getFrequency() { return frequency; }
+        public void setFrequency(String frequency) { this.frequency = frequency; }
+
+        public QuietHoursResponseData getQuietHours() { return quietHours; }
+        public void setQuietHours(QuietHoursResponseData quietHours) { this.quietHours = quietHours; }
+
+        public NotificationTypesResponseData getTypes() { return types; }
+        public void setTypes(NotificationTypesResponseData types) { this.types = types; }
+
+        public String getUpdatedAt() { return updatedAt; }
+        public void setUpdatedAt(String updatedAt) { this.updatedAt = updatedAt; }
+    }
+
+    public static class QuietHoursResponseData {
+        private boolean enabled;
+        private String start;
+        private String end;
+
+        public boolean isEnabled() { return enabled; }
+        public void setEnabled(boolean enabled) { this.enabled = enabled; }
+
+        public String getStart() { return start; }
+        public void setStart(String start) { this.start = start; }
+
+        public String getEnd() { return end; }
+        public void setEnd(String end) { this.end = end; }
+    }
+
+    public static class NotificationTypesResponseData {
+        private boolean document_shared;
+        private boolean review_reminder;
+        private boolean achievement_unlocked;
+        private boolean system_update;
+        private boolean promotional;
+
+        public boolean isDocument_shared() { return document_shared; }
+        public void setDocument_shared(boolean document_shared) { this.document_shared = document_shared; }
+
+        public boolean isReview_reminder() { return review_reminder; }
+        public void setReview_reminder(boolean review_reminder) { this.review_reminder = review_reminder; }
+
+        public boolean isAchievement_unlocked() { return achievement_unlocked; }
+        public void setAchievement_unlocked(boolean achievement_unlocked) { this.achievement_unlocked = achievement_unlocked; }
+
+        public boolean isSystem_update() { return system_update; }
+        public void setSystem_update(boolean system_update) { this.system_update = system_update; }
+
+        public boolean isPromotional() { return promotional; }
+        public void setPromotional(boolean promotional) { this.promotional = promotional; }
+    }
+
+    @PutMapping("/settings")
+    public ResponseEntity<UpdateSettingsResponse> updateSettings(
+            @RequestHeader(value = "Authorization", required = false) String authHeader,
+            @RequestBody UpdateSettingsRequest request) {
+
+        try {
+            // 打印接收到的请求
+            printRequest(request);
+
+            // 1. 验证认证信息
+            if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new UpdateSettingsResponse(false, "请先登录", null)
+                );
+            }
+
+            String token = authHeader.substring(7);
+
+            // 2. 根据token获取用户ID
+            String getUserSql = "SELECT user_id FROM user_sessions WHERE access_token = ? AND expires_at > NOW()";
+            List<Map<String, Object>> sessions = jdbcTemplate.queryForList(getUserSql, token);
+
+            if (sessions.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new UpdateSettingsResponse(false, "登录已过期，请重新登录", null)
+                );
+            }
+
+            Map<String, Object> session = sessions.get(0);
+            Integer userId = (Integer) session.get("user_id");
+
+            // 3. 准备更新数据
+            LocalDateTime now = LocalDateTime.now();
+            DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss");
+
+            // 检查是否已存在设置
+            String checkSql = "SELECT COUNT(*) as count FROM notification_settings WHERE user_id = ?";
+            Map<String, Object> checkResult = jdbcTemplate.queryForMap(checkSql, userId);
+            long count = ((Number) checkResult.get("count")).longValue();
+
+            // 准备参数
+            boolean email = request.getEmail() != null ? request.getEmail() : true;
+            boolean push = request.getPush() != null ? request.getPush() : true;
+            boolean desktop = request.getDesktop() != null ? request.getDesktop() : true;
+            String frequency = request.getFrequency() != null ? request.getFrequency() : "immediate";
+
+            // 处理静默时间
+            boolean quietHoursEnabled = true;
+            String quietHoursStart = "22:00";
+            String quietHoursEnd = "08:00";
+
+            if (request.getQuietHours() != null) {
+                if (request.getQuietHours().getEnabled() != null) {
+                    quietHoursEnabled = request.getQuietHours().getEnabled();
+                }
+                if (request.getQuietHours().getStart() != null) {
+                    quietHoursStart = request.getQuietHours().getStart();
+                }
+                if (request.getQuietHours().getEnd() != null) {
+                    quietHoursEnd = request.getQuietHours().getEnd();
+                }
+            }
+
+            // 处理通知类型
+            Map<String, Boolean> notificationTypes = new HashMap<>();
+            notificationTypes.put("document_shared", true);
+            notificationTypes.put("review_reminder", true);
+            notificationTypes.put("achievement_unlocked", true);
+            notificationTypes.put("system_update", true);
+            notificationTypes.put("promotional", false);
+
+            if (request.getTypes() != null) {
+                if (request.getTypes().getDocument_shared() != null) {
+                    notificationTypes.put("document_shared", request.getTypes().getDocument_shared());
+                }
+                if (request.getTypes().getReview_reminder() != null) {
+                    notificationTypes.put("review_reminder", request.getTypes().getReview_reminder());
+                }
+                if (request.getTypes().getAchievement_unlocked() != null) {
+                    notificationTypes.put("achievement_unlocked", request.getTypes().getAchievement_unlocked());
+                }
+                if (request.getTypes().getSystem_update() != null) {
+                    notificationTypes.put("system_update", request.getTypes().getSystem_update());
+                }
+                if (request.getTypes().getPromotional() != null) {
+                    notificationTypes.put("promotional", request.getTypes().getPromotional());
+                }
+            }
+
+            String notificationTypesJson = objectMapper.writeValueAsString(notificationTypes);
+
+            int updatedRows;
+
+            if (count > 0) {
+                // 更新现有设置
+                String updateSql = "UPDATE notification_settings SET email_notifications = ?, push_notifications = ?, desktop_notifications = ?, notification_frequency = ?, quiet_hours_enabled = ?, quiet_hours_start = ?, quiet_hours_end = ?, notification_types = ?, updated_at = ? WHERE user_id = ?";
+                updatedRows = jdbcTemplate.update(updateSql,
+                        email,
+                        push,
+                        desktop,
+                        frequency,
+                        quietHoursEnabled,
+                        quietHoursStart,
+                        quietHoursEnd,
+                        notificationTypesJson,
+                        now,
+                        userId
+                );
+            } else {
+                // 插入新设置
+                String insertSql = "INSERT INTO notification_settings (user_id, email_notifications, push_notifications, desktop_notifications, notification_frequency, quiet_hours_enabled, quiet_hours_start, quiet_hours_end, notification_types, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+                updatedRows = jdbcTemplate.update(insertSql,
+                        userId,
+                        email,
+                        push,
+                        desktop,
+                        frequency,
+                        quietHoursEnabled,
+                        quietHoursStart,
+                        quietHoursEnd,
+                        notificationTypesJson,
+                        now,
+                        now
+                );
+            }
+
+            printQueryResult("更新行数: " + updatedRows);
+
+            if (updatedRows > 0) {
+                // 4. 创建响应数据
+                NotificationSettingsData settings = new NotificationSettingsData();
+                settings.setEmail(email);
+                settings.setPush(push);
+                settings.setDesktop(desktop);
+                settings.setFrequency(frequency);
+                settings.setUpdatedAt(now.format(formatter) + "Z");
+
+                QuietHoursResponseData quietHoursResp = new QuietHoursResponseData();
+                quietHoursResp.setEnabled(quietHoursEnabled);
+                quietHoursResp.setStart(quietHoursStart);
+                quietHoursResp.setEnd(quietHoursEnd);
+                settings.setQuietHours(quietHoursResp);
+
+                NotificationTypesResponseData typesResp = new NotificationTypesResponseData();
+                typesResp.setDocument_shared(notificationTypes.get("document_shared"));
+                typesResp.setReview_reminder(notificationTypes.get("review_reminder"));
+                typesResp.setAchievement_unlocked(notificationTypes.get("achievement_unlocked"));
+                typesResp.setSystem_update(notificationTypes.get("system_update"));
+                typesResp.setPromotional(notificationTypes.get("promotional"));
+                settings.setTypes(typesResp);
+
+                // 5. 创建响应
+                UpdateSettingsResponse response = new UpdateSettingsResponse(
+                        true,
+                        "更新通知设置成功",
+                        settings
+                );
+
+                // 打印返回数据
+                printResponse(response);
+
+                return ResponseEntity.ok(response);
+            } else {
+                return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                        new UpdateSettingsResponse(false, "更新通知设置失败", null)
+                );
+            }
+
+        } catch (Exception e) {
+            System.err.println("更新通知设置过程中发生错误: " + e.getMessage());
+            e.printStackTrace();
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                    new UpdateSettingsResponse(false, "服务器内部错误: " + e.getMessage(), null)
+            );
+        }
+    }
+}
+--- 结束文件: NotificationUpdateSettings.java ---
+

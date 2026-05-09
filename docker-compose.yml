@@ -1,6 +1,17 @@
-version: '3.8'
-
 services:
+  nacos:
+    image: nacos/nacos-server:latest
+    container_name: nacos
+    ports:
+      - "8849:8848"
+    environment:
+      - MODE=standalone
+      - NACOS_AUTH_TOKEN=SecretKey012345678901234567890123456789012345678901234567890123456789
+      - NACOS_AUTH_IDENTITY_KEY=serverIdentity
+      - NACOS_AUTH_IDENTITY_VALUE=security
+    networks:
+      - readingapp-network
+
   db:
     build: ./mysql
     container_name: readingapp-db
@@ -9,48 +20,93 @@ services:
       MYSQL_DATABASE: vue_reading_app
       MYSQL_ROOT_PASSWORD: "13603994106"
     ports:
-      - "3306:3306"
+      - "3307:3306"
     volumes:
       - db_data:/var/lib/mysql
     networks:
       - readingapp-network
-    healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p13603994106"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
 
-  backend:
-    build: ./backend
-    container_name: readingapp-backend
-    restart: always
+  gateway-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gateway-service
     ports:
       - "8080:8080"
+    command: ["java", "-jar", "gateway-service.jar"]
     environment:
-      - SPRING_DATASOURCE_URL=jdbc:mysql://db:3306/vue_reading_app?useUnicode=true&characterEncoding=utf8&useSSL=false&serverTimezone=Asia/Shanghai
-      - SPRING_DATASOURCE_USERNAME=root
-      - SPRING_DATASOURCE_PASSWORD=13603994106
-      - SPRING_JPA_HIBERNATE_DDL_AUTO=update
+      - NACOS_SERVER=nacos:8848
     depends_on:
-      db:
-        condition: service_healthy
-    volumes:
-      - ./backend/uploads:/app/uploads
-      - ./backend/logs:/app/logs
+      - nacos
+      - db
+    networks:
+      - readingapp-network
+
+  auth-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: auth-service
+    command: ["java", "-jar", "auth-service.jar"]
+    environment:
+      - NACOS_SERVER=nacos:8848
+    depends_on:
+      - nacos
+      - db
+    networks:
+      - readingapp-network
+
+  document-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: document-service
+    command: ["java", "-jar", "document-service.jar"]
+    environment:
+      - NACOS_SERVER=nacos:8848
+    depends_on:
+      - nacos
+      - db
+    networks:
+      - readingapp-network
+
+  study-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: study-service
+    command: ["java", "-jar", "study-service.jar"]
+    environment:
+      - NACOS_SERVER=nacos:8848
+    depends_on:
+      - nacos
+      - db
+    networks:
+      - readingapp-network
+
+  user-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: user-service
+    command: ["java", "-jar", "user-service.jar"]
+    environment:
+      - NACOS_SERVER=nacos:8848
+    depends_on:
+      - nacos
+      - db
     networks:
       - readingapp-network
 
   frontend:
     build:
       context: ./frontend
-      args:
-        - VUE_APP_API_BASE_URL=http://localhost:8080/api/v1
     container_name: readingapp-frontend
     restart: always
     ports:
       - "80:80"
     depends_on:
-      - backend
+      - gateway-service
     networks:
       - readingapp-network
 

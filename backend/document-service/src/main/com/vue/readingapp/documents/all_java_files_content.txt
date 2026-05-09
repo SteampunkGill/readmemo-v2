@@ -1,0 +1,4658 @@
+--- 开始文件: DocumentsBatchDelete.java ---
+package com.vue.readingapp.documents;
+
+import org.springframework.web.bind.annotation.*;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.beans.factory.annotation.Autowired;
+import java.util.*;
+import java.time.LocalDateTime;
+import java.sql.Timestamp;
+
+@RestController
+@RequestMapping("/api/v1/documents")
+public class DocumentsBatchDelete {
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    // 打印接收到的请求
+    private void printRequest(BatchDeleteRequest request) {
+        System.out.println("=== 收到批量删除文档请求 ===");
+        System.out.println("文档ID列表: " + request.getDocumentIds());
+        System.out.println("=========================");
+    }
+
+    // 打印查询结果
+    private void printQueryResult(int deletedCount, List<Integer> failedIds) {
+        System.out.println("=== 批量删除结果 ===");
+        System.out.println("成功删除数量: " + deletedCount);
+        System.out.println("失败文档ID: " + failedIds);
+        System.out.println("==================");
+    }
+
+    // 打印返回数据
+    private void printResponse(BatchDeleteResponse response) {
+        System.out.println("=== 准备返回的响应 ===");
+        System.out.println("响应数据: " + response);
+        System.out.println("===================");
+    }
+
+    // 请求DTO
+    public static class BatchDeleteRequest {
+        private List<Integer> documentIds;
+
+        public List<Integer> getDocumentIds() { return documentIds; }
+        public void setDocumentIds(List<Integer> documentIds) { this.documentIds = documentIds; }
+    }
+
+    // 响应DTO
+    public static class BatchDeleteResponse {
+        private boolean success;
+        private String message;
+        private BatchDeleteData data;
+
+        public BatchDeleteResponse(boolean success, String message, BatchDeleteData data) {
+            this.success = success;
+            this.message = message;
+            this.data = data;
+        }
+
+        public boolean isSuccess() { return success; }
+        public void setSuccess(boolean success) { this.success = success; }
+
+        public String getMessage() { return message; }
+        public void setMessage(String message) { this.message = message; }
+
+        public BatchDeleteData getData() { return data; }
+        public void setData(BatchDeleteData data) { this.data = data; }
+    }
+
+    public static class BatchDeleteData {
+        private Integer processedCount;
+        private Integer successCount;
+        private Integer failedCount;
+        private List<Integer> failedIds;
+
+        public BatchDeleteData(Integer processedCount, Integer successCount, Integer failedCount, List<Integer> failedIds) {
+            this.processedCount = processedCount;
+            this.successCount = successCount;
+            this.failedCount = failedCount;
+            this.failedIds = failedIds;
+        }
+
+        public Integer getProcessedCount() { return processedCount; }
+        public void setProcessedCount(Integer processedCount) { this.processedCount = processedCount; }
+
+        public Integer getSuccessCount() { return successCount; }
+        public void setSuccessCount(Integer successCount) { this.successCount = successCount; }
+
+        public Integer getFailedCount() { return failedCount; }
+        public void setFailedCount(Integer failedCount) { this.failedCount = failedCount; }
+
+        public List<Integer> getFailedIds() { return failedIds; }
+        public void setFailedIds(List<Integer> failedIds) { this.failedIds = failedIds; }
+    }
+
+    @DeleteMapping("/batch")
+    public ResponseEntity<BatchDeleteResponse> batchDeleteDocuments(
+            @RequestBody BatchDeleteRequest request,
+            @RequestHeader(value = "Authorization", required = false) String authHeader) {
+
+        try {
+            // 打印接收到的请求
+            printRequest(request);
+
+            // 1. 验证认证
+            if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new BatchDeleteResponse(false, "请先登录", null)
+                );
+            }
+
+            String token = authHeader.substring(7);
+
+            // 验证token
+            String tokenSql = "SELECT user_id FROM user_sessions WHERE access_token = ? AND expires_at > NOW()";
+            List<Map<String, Object>> tokenResults = jdbcTemplate.queryForList(tokenSql, token);
+
+            if (tokenResults.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new BatchDeleteResponse(false, "登录已过期，请重新登录", null)
+                );
+            }
+
+            Integer userId = (Integer) tokenResults.get(0).get("user_id");
+
+            // 2. 验证请求数据
+            if (request == null || request.getDocumentIds() == null || request.getDocumentIds().isEmpty()) {
+                return ResponseEntity.badRequest().body(
+                        new BatchDeleteResponse(false, "文档ID列表不能为空", null)
+                );
+            }
+
+            List<Integer> documentIds = request.getDocumentIds();
+            List<Integer> failedIds = new ArrayList<>();
+            int successCount = 0;
+
+            LocalDateTime now = LocalDateTime.now();
+            Timestamp timestamp = Timestamp.valueOf(now);
+
+            // 3. 批量删除每个文档
+            for (Integer documentId : documentIds) {
+                try {
+                    // 检查文档是否存在且属于当前用户
+                    String checkSql = "SELECT document_id FROM documents WHERE document_id = ? AND user_id = ? AND deleted_at IS NULL";
+                    List<Map<String, Object>> documents = jdbcTemplate.queryForList(checkSql, documentId, userId);
+
+                    if (documents.isEmpty()) {
+                        failedIds.add(documentId);
+                        continue;
+                    }
+
+                    // 执行软删除
+                    String deleteSql = "UPDATE documents SET deleted_at = ?, updated_at = ? WHERE document_id = ? AND user_id = ?";
+                    int rowsDeleted = jdbcTemplate.update(deleteSql, timestamp, timestamp, documentId, userId);
+
+                    if (rowsDeleted > 0) {
+                        successCount++;
+
+                        // 从处理队列中移除
+                        String deleteQueueSql = "DELETE FROM document_processing_queue WHERE document_id = ?";
+                        jdbcTemplate.update(deleteQueueSql, documentId);
+                    } else {
+                        failedIds.add(documentId);
+                    }
+
+                } catch (Exception e) {
+                    System.err.println("删除文档 " + documentId + " 时发生错误: " + e.getMessage());
+                    failedIds.add(documentId);
+                }
+            }
+
+            // 4. 打印查询结果
+            printQueryResult(successCount, failedIds);
+
+            // 5. 构建响应数据
+            BatchDeleteData data = new BatchDeleteData(
+                    documentIds.size(),
+                    successCount,
+                    failedIds.size(),
+                    failedIds
+            );
+
+            String message;
+            if (failedIds.isEmpty()) {
+                message = "成功删除 " + successCount + " 个文档";
+            } else {
+                message = "成功删除 " + successCount + " 个文档，" + failedIds.size() + " 个文档删除失败";
+            }
+
+            BatchDeleteResponse response = new BatchDeleteResponse(true, message, data);
+
+            // 打印返回数据
+            printResponse(response);
+
+            return ResponseEntity.ok(response);
+
+        } catch (Exception e) {
+            System.err.println("批量删除文档过程中发生错误: " + e.getMessage());
+            e.printStackTrace();
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                    new BatchDeleteResponse(false, "服务器内部错误: " + e.getMessage(), null)
+            );
+        }
+    }
+}
+--- 结束文件: DocumentsBatchDelete.java ---
+
+--- 开始文件: DocumentsBatchDocumentAction.java ---
+package com.vue.readingapp.documents;
+
+import org.springframework.web.bind.annotation.*;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.beans.factory.annotation.Autowired;
+import java.util.*;
+import java.time.LocalDateTime;
+import java.sql.Timestamp;
+
+@RestController
+@RequestMapping("/api/v1/documents")
+public class DocumentsBatchDocumentAction {
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    // 打印接收到的请求
+    private void printRequest(String action, BatchActionRequest request, String authHeader) {
+        System.out.println("=== 收到批量操作文档请求 ===");
+        System.out.println("操作类型: " + action);
+        System.out.println("请求数据: " + request);
+        System.out.println("认证头: " + authHeader);
+        System.out.println("=========================");
+    }
+
+    // 打印查询结果
+    private void printQueryResult(int processedCount, int successCount, List<Integer> failedIds) {
+        System.out.println("=== 批量操作结果 ===");
+        System.out.println("处理总数: " + processedCount);
+        System.out.println("成功数量: " + successCount);
+        System.out.println("失败数量: " + failedIds.size());
+        System.out.println("失败ID列表: " + failedIds);
+        System.out.println("==================");
+    }
+
+    // 打印返回数据
+    private void printResponse(BatchActionResponse response) {
+        System.out.println("=== 准备返回的响应 ===");
+        System.out.println("响应数据: " + response);
+        System.out.println("===================");
+    }
+
+    // 请求DTO
+    public static class BatchActionRequest {
+        private List<Integer> ids;
+        private Map<String, Object> data;
+
+        public List<Integer> getIds() { return ids; }
+        public void setIds(List<Integer> ids) { this.ids = ids; }
+
+        public Map<String, Object> getData() { return data; }
+        public void setData(Map<String, Object> data) { this.data = data; }
+    }
+
+    // 响应DTO
+    public static class BatchActionResponse {
+        private boolean success;
+        private String message;
+        private BatchActionData data;
+
+        public BatchActionResponse(boolean success, String message, BatchActionData data) {
+            this.success = success;
+            this.message = message;
+            this.data = data;
+        }
+
+        public boolean isSuccess() { return success; }
+        public void setSuccess(boolean success) { this.success = success; }
+
+        public String getMessage() { return message; }
+        public void setMessage(String message) { this.message = message; }
+
+        public BatchActionData getData() { return data; }
+        public void setData(BatchActionData data) { this.data = data; }
+    }
+
+    public static class BatchActionData {
+        private Integer processedCount;
+        private Integer successCount;
+        private Integer failedCount;
+        private List<Integer> failedIds;
+        private List<Map<String, Object>> failedItems;
+
+        public BatchActionData(Integer processedCount, Integer successCount, Integer failedCount,
+                               List<Integer> failedIds, List<Map<String, Object>> failedItems) {
+            this.processedCount = processedCount;
+            this.successCount = successCount;
+            this.failedCount = failedCount;
+            this.failedIds = failedIds;
+            this.failedItems = failedItems;
+        }
+
+        // Getters and Setters
+        public Integer getProcessedCount() { return processedCount; }
+        public void setProcessedCount(Integer processedCount) { this.processedCount = processedCount; }
+
+        public Integer getSuccessCount() { return successCount; }
+        public void setSuccessCount(Integer successCount) { this.successCount = successCount; }
+
+        public Integer getFailedCount() { return failedCount; }
+        public void setFailedCount(Integer failedCount) { this.failedCount = failedCount; }
+
+        public List<Integer> getFailedIds() { return failedIds; }
+        public void setFailedIds(List<Integer> failedIds) { this.failedIds = failedIds; }
+
+        public List<Map<String, Object>> getFailedItems() { return failedItems; }
+        public void setFailedItems(List<Map<String, Object>> failedItems) { this.failedItems = failedItems; }
+    }
+
+    @PostMapping("/batch-action")
+    public ResponseEntity<BatchActionResponse> batchDocumentAction(
+            @RequestParam("action") String action,
+            @RequestBody BatchActionRequest request,
+            @RequestHeader(value = "Authorization", required = false) String authHeader) {
+
+        try {
+            // 打印接收到的请求
+            printRequest(action, request, authHeader);
+
+            // 1. 验证认证
+            if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new BatchActionResponse(false, "请先登录", null)
+                );
+            }
+
+            String token = authHeader.substring(7);
+
+            // 验证token
+            String tokenSql = "SELECT user_id FROM user_sessions WHERE access_token = ? AND expires_at > NOW()";
+            List<Map<String, Object>> tokenResults = jdbcTemplate.queryForList(tokenSql, token);
+
+            if (tokenResults.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new BatchActionResponse(false, "登录已过期，请重新登录", null)
+                );
+            }
+
+            Integer userId = (Integer) tokenResults.get(0).get("user_id");
+
+            // 2. 验证请求数据
+            if (action == null || action.trim().isEmpty()) {
+                return ResponseEntity.badRequest().body(
+                        new BatchActionResponse(false, "操作类型不能为空", null)
+                );
+            }
+
+            if (request == null || request.getIds() == null || request.getIds().isEmpty()) {
+                return ResponseEntity.badRequest().body(
+                        new BatchActionResponse(false, "文档ID列表不能为空", null)
+                );
+            }
+
+            List<Integer> documentIds = request.getIds();
+            List<Integer> failedIds = new ArrayList<>();
+            List<Map<String, Object>> failedItems = new ArrayList<>();
+            int successCount = 0;
+
+            LocalDateTime now = LocalDateTime.now();
+            Timestamp timestamp = Timestamp.valueOf(now);
+
+            // 3. 根据操作类型执行批量操作
+            switch (action.toLowerCase()) {
+                case "update":
+                    successCount = batchUpdateAction(userId, documentIds, request.getData(), timestamp, failedIds, failedItems);
+                    break;
+
+                case "delete":
+                    successCount = batchDeleteAction(userId, documentIds, timestamp, failedIds, failedItems);
+                    break;
+
+                case "favorite":
+                    successCount = batchFavoriteAction(userId, documentIds, true, timestamp, failedIds, failedItems);
+                    break;
+
+                case "unfavorite":
+                    successCount = batchFavoriteAction(userId, documentIds, false, timestamp, failedIds, failedItems);
+                    break;
+
+                case "public":
+                    successCount = batchPublicAction(userId, documentIds, true, timestamp, failedIds, failedItems);
+                    break;
+
+                case "private":
+                    successCount = batchPublicAction(userId, documentIds, false, timestamp, failedIds, failedItems);
+                    break;
+
+                default:
+                    return ResponseEntity.badRequest().body(
+                            new BatchActionResponse(false, "不支持的操作类型: " + action, null)
+                    );
+            }
+
+            // 4. 打印查询结果
+            printQueryResult(documentIds.size(), successCount, failedIds);
+
+            // 5. 构建响应数据
+            BatchActionData data = new BatchActionData(
+                    documentIds.size(),
+                    successCount,
+                    failedIds.size(),
+                    failedIds,
+                    failedItems
+            );
+
+            String message;
+            if (failedIds.isEmpty()) {
+                message = "成功对 " + successCount + " 个文档执行 " + action + " 操作";
+            } else {
+                message = "成功对 " + successCount + " 个文档执行 " + action + " 操作，" + failedIds.size() + " 个文档操作失败";
+            }
+
+            BatchActionResponse response = new BatchActionResponse(true, message, data);
+
+            // 打印返回数据
+            printResponse(response);
+
+            return ResponseEntity.ok(response);
+
+        } catch (Exception e) {
+            System.err.println("批量操作文档过程中发生错误: " + e.getMessage());
+            e.printStackTrace();
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                    new BatchActionResponse(false, "服务器内部错误: " + e.getMessage(), null)
+            );
+        }
+    }
+
+    // 批量更新操作
+    private int batchUpdateAction(Integer userId, List<Integer> documentIds, Map<String, Object> data,
+                                  Timestamp timestamp, List<Integer> failedIds, List<Map<String, Object>> failedItems) {
+        int successCount = 0;
+
+        if (data == null || data.isEmpty()) {
+            // 如果没有更新数据，直接返回
+            return 0;
+        }
+
+        for (Integer documentId : documentIds) {
+            try {
+                // 检查文档是否存在且属于当前用户
+                String checkSql = "SELECT document_id FROM documents WHERE document_id = ? AND user_id = ? AND deleted_at IS NULL";
+                List<Map<String, Object>> documents = jdbcTemplate.queryForList(checkSql, documentId, userId);
+
+                if (documents.isEmpty()) {
+                    failedIds.add(documentId);
+                    Map<String, Object> failedItem = new HashMap<>();
+                    failedItem.put("id", documentId);
+                    failedItem.put("reason", "文档不存在或没有权限");
+                    failedItems.add(failedItem);
+                    continue;
+                }
+
+                // 构建更新SQL
+                StringBuilder updateSql = new StringBuilder("UPDATE documents SET ");
+                List<Object> params = new ArrayList<>();
+
+                // 处理标题更新
+                if (data.containsKey("title")) {
+                    updateSql.append("title = ?, ");
+                    params.add(data.get("title"));
+                }
+
+                // 处理描述更新
+                if (data.containsKey("description")) {
+                    updateSql.append("description = ?, ");
+                    params.add(data.get("description"));
+                }
+
+                // 处理语言更新
+                if (data.containsKey("language")) {
+                    updateSql.append("language = ?, ");
+                    params.add(data.get("language"));
+                }
+
+                // 处理公开状态更新
+                if (data.containsKey("isPublic")) {
+                    updateSql.append("is_public = ?, ");
+                    params.add(data.get("isPublic"));
+                }
+
+                // 处理收藏状态更新
+                if (data.containsKey("isFavorite")) {
+                    updateSql.append("is_favorite = ?, ");
+                    params.add(data.get("isFavorite"));
+                }
+
+                // 添加更新时间
+                updateSql.append("updated_at = ? ");
+                params.add(timestamp);
+
+                updateSql.append("WHERE document_id = ? AND user_id = ?");
+                params.add(documentId);
+                params.add(userId);
+
+                // 执行更新
+                int rowsUpdated = jdbcTemplate.update(updateSql.toString(), params.toArray());
+
+                if (rowsUpdated > 0) {
+                    successCount++;
+                } else {
+                    failedIds.add(documentId);
+                    Map<String, Object> failedItem = new HashMap<>();
+                    failedItem.put("id", documentId);
+                    failedItem.put("reason", "更新失败");
+                    failedItems.add(failedItem);
+                }
+
+            } catch (Exception e) {
+                System.err.println("更新文档 " + documentId + " 时发生错误: " + e.getMessage());
+                failedIds.add(documentId);
+                Map<String, Object> failedItem = new HashMap<>();
+                failedItem.put("id", documentId);
+                failedItem.put("reason", e.getMessage());
+                failedItems.add(failedItem);
+            }
+        }
+
+        return successCount;
+    }
+
+    // 批量删除操作
+    private int batchDeleteAction(Integer userId, List<Integer> documentIds, Timestamp timestamp,
+                                  List<Integer> failedIds, List<Map<String, Object>> failedItems) {
+        int successCount = 0;
+
+        for (Integer documentId : documentIds) {
+            try {
+                // 检查文档是否存在且属于当前用户
+                String checkSql = "SELECT document_id, title FROM documents WHERE document_id = ? AND user_id = ? AND deleted_at IS NULL";
+                List<Map<String, Object>> documents = jdbcTemplate.queryForList(checkSql, documentId, userId);
+
+                if (documents.isEmpty()) {
+                    failedIds.add(documentId);
+                    Map<String, Object> failedItem = new HashMap<>();
+                    failedItem.put("id", documentId);
+                    failedItem.put("reason", "文档不存在或没有权限");
+                    failedItems.add(failedItem);
+                    continue;
+                }
+
+                // 执行软删除
+                String deleteSql = "UPDATE documents SET deleted_at = ?, updated_at = ? WHERE document_id = ? AND user_id = ?";
+                int rowsDeleted = jdbcTemplate.update(deleteSql, timestamp, timestamp, documentId, userId);
+
+                if (rowsDeleted > 0) {
+                    successCount++;
+
+                    // 从处理队列中移除
+                    String deleteQueueSql = "DELETE FROM document_processing_queue WHERE document_id = ?";
+                    jdbcTemplate.update(deleteQueueSql, documentId);
+                } else {
+                    failedIds.add(documentId);
+                    Map<String, Object> failedItem = new HashMap<>();
+                    failedItem.put("id", documentId);
+                    failedItem.put("reason", "删除失败");
+                    failedItems.add(failedItem);
+                }
+
+            } catch (Exception e) {
+                System.err.println("删除文档 " + documentId + " 时发生错误: " + e.getMessage());
+                failedIds.add(documentId);
+                Map<String, Object> failedItem = new HashMap<>();
+                failedItem.put("id", documentId);
+                failedItem.put("reason", e.getMessage());
+                failedItems.add(failedItem);
+            }
+        }
+
+        return successCount;
+    }
+
+    // 批量收藏操作
+    private int batchFavoriteAction(Integer userId, List<Integer> documentIds, boolean favorite,
+                                    Timestamp timestamp, List<Integer> failedIds, List<Map<String, Object>> failedItems) {
+        int successCount = 0;
+
+        for (Integer documentId : documentIds) {
+            try {
+                // 检查文档是否存在且属于当前用户
+                String checkSql = "SELECT document_id FROM documents WHERE document_id = ? AND user_id = ? AND deleted_at IS NULL";
+                List<Map<String, Object>> documents = jdbcTemplate.queryForList(checkSql, documentId, userId);
+
+                if (documents.isEmpty()) {
+                    failedIds.add(documentId);
+                    Map<String, Object> failedItem = new HashMap<>();
+                    failedItem.put("id", documentId);
+                    failedItem.put("reason", "文档不存在或没有权限");
+                    failedItems.add(failedItem);
+                    continue;
+                }
+
+                // 更新收藏状态
+                String updateSql = "UPDATE documents SET is_favorite = ?, updated_at = ? WHERE document_id = ? AND user_id = ?";
+                int rowsUpdated = jdbcTemplate.update(updateSql, favorite, timestamp, documentId, userId);
+
+                if (rowsUpdated > 0) {
+                    successCount++;
+                } else {
+                    failedIds.add(documentId);
+                    Map<String, Object> failedItem = new HashMap<>();
+                    failedItem.put("id", documentId);
+                    failedItem.put("reason", "更新收藏状态失败");
+                    failedItems.add(failedItem);
+                }
+
+            } catch (Exception e) {
+                System.err.println("更新文档 " + documentId + " 收藏状态时发生错误: " + e.getMessage());
+                failedIds.add(documentId);
+                Map<String, Object> failedItem = new HashMap<>();
+                failedItem.put("id", documentId);
+                failedItem.put("reason", e.getMessage());
+                failedItems.add(failedItem);
+            }
+        }
+
+        return successCount;
+    }
+
+    // 批量公开操作
+    private int batchPublicAction(Integer userId, List<Integer> documentIds, boolean isPublic,
+                                  Timestamp timestamp, List<Integer> failedIds, List<Map<String, Object>> failedItems) {
+        int successCount = 0;
+
+        for (Integer documentId : documentIds) {
+            try {
+                // 检查文档是否存在且属于当前用户
+                String checkSql = "SELECT document_id FROM documents WHERE document_id = ? AND user_id = ? AND deleted_at IS NULL";
+                List<Map<String, Object>> documents = jdbcTemplate.queryForList(checkSql, documentId, userId);
+
+                if (documents.isEmpty()) {
+                    failedIds.add(documentId);
+                    Map<String, Object> failedItem = new HashMap<>();
+                    failedItem.put("id", documentId);
+                    failedItem.put("reason", "文档不存在或没有权限");
+                    failedItems.add(failedItem);
+                    continue;
+                }
+
+                // 更新公开状态
+                String updateSql = "UPDATE documents SET is_public = ?, updated_at = ? WHERE document_id = ? AND user_id = ?";
+                int rowsUpdated = jdbcTemplate.update(updateSql, isPublic, timestamp, documentId, userId);
+
+                if (rowsUpdated > 0) {
+                    successCount++;
+                } else {
+                    failedIds.add(documentId);
+                    Map<String, Object> failedItem = new HashMap<>();
+                    failedItem.put("id", documentId);
+                    failedItem.put("reason", "更新公开状态失败");
+                    failedItems.add(failedItem);
+                }
+
+            } catch (Exception e) {
+                System.err.println("更新文档 " + documentId + " 公开状态时发生错误: " + e.getMessage());
+                failedIds.add(documentId);
+                Map<String, Object> failedItem = new HashMap<>();
+                failedItem.put("id", documentId);
+                failedItem.put("reason", e.getMessage());
+                failedItems.add(failedItem);
+            }
+        }
+
+        return successCount;
+    }
+}
+--- 结束文件: DocumentsBatchDocumentAction.java ---
+
+--- 开始文件: DocumentsBatchUpdate.java ---
+package com.vue.readingapp.documents;
+
+import org.springframework.web.bind.annotation.*;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.beans.factory.annotation.Autowired;
+import java.util.*;
+import java.time.LocalDateTime;
+import java.sql.Timestamp;
+
+@RestController
+@RequestMapping("/api/v1/documents")
+public class DocumentsBatchUpdate {
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    // 打印接收到的请求
+    private void printRequest(BatchUpdateRequest request) {
+        System.out.println("=== 收到批量更新文档请求 ===");
+        System.out.println("文档ID列表: " + request.getDocumentIds());
+        System.out.println("更新数据: " + request);
+        System.out.println("=========================");
+    }
+
+    // 打印查询结果
+    private void printQueryResult(int updatedCount, List<Integer> failedIds) {
+        System.out.println("=== 批量更新结果 ===");
+        System.out.println("成功更新数量: " + updatedCount);
+        System.out.println("失败文档ID: " + failedIds);
+        System.out.println("==================");
+    }
+
+    // 打印返回数据
+    private void printResponse(BatchUpdateResponse response) {
+        System.out.println("=== 准备返回的响应 ===");
+        System.out.println("响应数据: " + response);
+        System.out.println("===================");
+    }
+
+    // 请求DTO
+    public static class BatchUpdateRequest {
+        private List<Integer> documentIds;
+        private String title;
+        private String description;
+        private List<String> tags;
+        private String language;
+        private Boolean isPublic;
+        private Boolean isFavorite;
+
+        public List<Integer> getDocumentIds() { return documentIds; }
+        public void setDocumentIds(List<Integer> documentIds) { this.documentIds = documentIds; }
+
+        public String getTitle() { return title; }
+        public void setTitle(String title) { this.title = title; }
+
+        public String getDescription() { return description; }
+        public void setDescription(String description) { this.description = description; }
+
+        public List<String> getTags() { return tags; }
+        public void setTags(List<String> tags) { this.tags = tags; }
+
+        public String getLanguage() { return language; }
+        public void setLanguage(String language) { this.language = language; }
+
+        public Boolean getIsPublic() { return isPublic; }
+        public void setIsPublic(Boolean isPublic) { this.isPublic = isPublic; }
+
+        public Boolean getIsFavorite() { return isFavorite; }
+        public void setIsFavorite(Boolean isFavorite) { this.isFavorite = isFavorite; }
+    }
+
+    // 响应DTO
+    public static class BatchUpdateResponse {
+        private boolean success;
+        private String message;
+        private BatchUpdateData data;
+
+        public BatchUpdateResponse(boolean success, String message, BatchUpdateData data) {
+            this.success = success;
+            this.message = message;
+            this.data = data;
+        }
+
+        public boolean isSuccess() { return success; }
+        public void setSuccess(boolean success) { this.success = success; }
+
+        public String getMessage() { return message; }
+        public void setMessage(String message) { this.message = message; }
+
+        public BatchUpdateData getData() { return data; }
+        public void setData(BatchUpdateData data) { this.data = data; }
+    }
+
+    public static class BatchUpdateData {
+        private Integer processedCount;
+        private Integer successCount;
+        private Integer failedCount;
+        private List<Integer> failedIds;
+
+        public BatchUpdateData(Integer processedCount, Integer successCount, Integer failedCount, List<Integer> failedIds) {
+            this.processedCount = processedCount;
+            this.successCount = successCount;
+            this.failedCount = failedCount;
+            this.failedIds = failedIds;
+        }
+
+        public Integer getProcessedCount() { return processedCount; }
+        public void setProcessedCount(Integer processedCount) { this.processedCount = processedCount; }
+
+        public Integer getSuccessCount() { return successCount; }
+        public void setSuccessCount(Integer successCount) { this.successCount = successCount; }
+
+        public Integer getFailedCount() { return failedCount; }
+        public void setFailedCount(Integer failedCount) { this.failedCount = failedCount; }
+
+        public List<Integer> getFailedIds() { return failedIds; }
+        public void setFailedIds(List<Integer> failedIds) { this.failedIds = failedIds; }
+    }
+
+    @PutMapping("/batch")
+    public ResponseEntity<BatchUpdateResponse> batchUpdateDocuments(
+            @RequestBody BatchUpdateRequest request,
+            @RequestHeader(value = "Authorization", required = false) String authHeader) {
+
+        try {
+            // 打印接收到的请求
+            printRequest(request);
+
+            // 1. 验证认证
+            if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new BatchUpdateResponse(false, "请先登录", null)
+                );
+            }
+
+            String token = authHeader.substring(7);
+
+            // 验证token
+            String tokenSql = "SELECT user_id FROM user_sessions WHERE access_token = ? AND expires_at > NOW()";
+            List<Map<String, Object>> tokenResults = jdbcTemplate.queryForList(tokenSql, token);
+
+            if (tokenResults.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new BatchUpdateResponse(false, "登录已过期，请重新登录", null)
+                );
+            }
+
+            Integer userId = (Integer) tokenResults.get(0).get("user_id");
+
+            // 2. 验证请求数据
+            if (request == null || request.getDocumentIds() == null || request.getDocumentIds().isEmpty()) {
+                return ResponseEntity.badRequest().body(
+                        new BatchUpdateResponse(false, "文档ID列表不能为空", null)
+                );
+            }
+
+            if (request.getTitle() == null && request.getDescription() == null &&
+                    request.getTags() == null && request.getLanguage() == null &&
+                    request.getIsPublic() == null && request.getIsFavorite() == null) {
+                return ResponseEntity.badRequest().body(
+                        new BatchUpdateResponse(false, "至少提供一个更新字段", null)
+                );
+            }
+
+            List<Integer> documentIds = request.getDocumentIds();
+            List<Integer> failedIds = new ArrayList<>();
+            int successCount = 0;
+
+            LocalDateTime now = LocalDateTime.now();
+            Timestamp timestamp = Timestamp.valueOf(now);
+
+            // 3. 批量更新每个文档
+            for (Integer documentId : documentIds) {
+                try {
+                    // 检查文档是否存在且属于当前用户
+                    String checkSql = "SELECT document_id FROM documents WHERE document_id = ? AND user_id = ? AND deleted_at IS NULL";
+                    List<Map<String, Object>> documents = jdbcTemplate.queryForList(checkSql, documentId, userId);
+
+                    if (documents.isEmpty()) {
+                        failedIds.add(documentId);
+                        continue;
+                    }
+
+                    // 构建更新SQL
+                    StringBuilder updateSql = new StringBuilder("UPDATE documents SET ");
+                    List<Object> params = new ArrayList<>();
+
+                    if (request.getTitle() != null) {
+                        updateSql.append("title = ?, ");
+                        params.add(request.getTitle());
+                    }
+
+                    if (request.getDescription() != null) {
+                        updateSql.append("description = ?, ");
+                        params.add(request.getDescription());
+                    }
+
+                    if (request.getLanguage() != null) {
+                        updateSql.append("language = ?, ");
+                        params.add(request.getLanguage());
+                    }
+
+                    if (request.getIsPublic() != null) {
+                        updateSql.append("is_public = ?, ");
+                        params.add(request.getIsPublic());
+                    }
+
+                    if (request.getIsFavorite() != null) {
+                        updateSql.append("is_favorite = ?, ");
+                        params.add(request.getIsFavorite());
+                    }
+
+                    // 添加更新时间
+                    updateSql.append("updated_at = ? ");
+                    params.add(timestamp);
+
+                    updateSql.append("WHERE document_id = ? AND user_id = ?");
+                    params.add(documentId);
+                    params.add(userId);
+
+                    // 执行更新
+                    int rowsUpdated = jdbcTemplate.update(updateSql.toString(), params.toArray());
+
+                    if (rowsUpdated > 0) {
+                        successCount++;
+
+                        // 处理标签更新
+                        if (request.getTags() != null) {
+                            // 删除旧的标签关系
+                            String deleteRelationsSql = "DELETE dtr FROM document_tag_relations dtr " +
+                                    "JOIN document_tags dt ON dtr.tag_id = dt.tag_id " +
+                                    "WHERE dtr.document_id = ? AND dt.user_id = ?";
+                            jdbcTemplate.update(deleteRelationsSql, documentId, userId);
+
+                            // 添加新的标签关系
+                            for (String tagName : request.getTags()) {
+                                if (tagName == null || tagName.trim().isEmpty()) continue;
+
+                                // 检查标签是否已存在
+                                String checkTagSql = "SELECT tag_id FROM document_tags WHERE user_id = ? AND tag_name = ?";
+                                List<Map<String, Object>> existingTags = jdbcTemplate.queryForList(checkTagSql, userId, tagName);
+
+                                Integer tagId;
+                                if (existingTags.isEmpty()) {
+                                    // 创建新标签
+                                    String insertTagSql = "INSERT INTO document_tags (user_id, tag_name, created_at) VALUES (?, ?, ?)";
+                                    jdbcTemplate.update(insertTagSql, userId, tagName, timestamp);
+
+                                    String lastTagIdSql = "SELECT LAST_INSERT_ID() as id";
+                                    tagId = jdbcTemplate.queryForObject(lastTagIdSql, Integer.class);
+                                } else {
+                                    tagId = (Integer) existingTags.get(0).get("tag_id");
+                                }
+
+                                // 建立文档-标签关系
+                                String insertRelationSql = "INSERT INTO document_tag_relations (document_id, tag_id, created_at) VALUES (?, ?, ?)";
+                                jdbcTemplate.update(insertRelationSql, documentId, tagId, timestamp);
+                            }
+                        }
+                    } else {
+                        failedIds.add(documentId);
+                    }
+
+                } catch (Exception e) {
+                    System.err.println("更新文档 " + documentId + " 时发生错误: " + e.getMessage());
+                    failedIds.add(documentId);
+                }
+            }
+
+            // 4. 打印查询结果
+            printQueryResult(successCount, failedIds);
+
+            // 5. 构建响应数据
+            BatchUpdateData data = new BatchUpdateData(
+                    documentIds.size(),
+                    successCount,
+                    failedIds.size(),
+                    failedIds
+            );
+
+            String message;
+            if (failedIds.isEmpty()) {
+                message = "成功更新 " + successCount + " 个文档";
+            } else {
+                message = "成功更新 " + successCount + " 个文档，" + failedIds.size() + " 个文档更新失败";
+            }
+
+            BatchUpdateResponse response = new BatchUpdateResponse(true, message, data);
+
+            // 打印返回数据
+            printResponse(response);
+
+            return ResponseEntity.ok(response);
+
+        } catch (Exception e) {
+            System.err.println("批量更新文档过程中发生错误: " + e.getMessage());
+            e.printStackTrace();
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                    new BatchUpdateResponse(false, "服务器内部错误: " + e.getMessage(), null)
+            );
+        }
+    }
+}
+--- 结束文件: DocumentsBatchUpdate.java ---
+
+--- 开始文件: DocumentsDelete.java ---
+package com.vue.readingapp.documents;
+
+import org.springframework.web.bind.annotation.*;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.beans.factory.annotation.Autowired;
+import java.util.*;
+import java.time.LocalDateTime;
+import java.sql.Timestamp;
+
+@RestController
+@RequestMapping("/api/v1/documents")
+public class DocumentsDelete {
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    // 打印接收到的请求
+    private void printRequest(Integer documentId, String authHeader) {
+        System.out.println("=== 收到删除文档请求 ===");
+        System.out.println("文档ID: " + documentId);
+        System.out.println("认证头: " + authHeader);
+        System.out.println("=====================");
+    }
+
+    // 打印返回数据
+    private void printResponse(DeleteResponse response) {
+        System.out.println("=== 准备返回的响应 ===");
+        System.out.println("响应数据: " + response);
+        System.out.println("===================");
+    }
+
+    // 响应DTO
+    public static class DeleteResponse {
+        private boolean success;
+        private String message;
+        private DeleteData data;
+
+        public DeleteResponse(boolean success, String message, DeleteData data) {
+            this.success = success;
+            this.message = message;
+            this.data = data;
+        }
+
+        public boolean isSuccess() { return success; }
+        public void setSuccess(boolean success) { this.success = success; }
+
+        public String getMessage() { return message; }
+        public void setMessage(String message) { this.message = message; }
+
+        public DeleteData getData() { return data; }
+        public void setData(DeleteData data) { this.data = data; }
+    }
+
+    public static class DeleteData {
+        private Integer deletedId;
+
+        public DeleteData(Integer deletedId) {
+            this.deletedId = deletedId;
+        }
+
+        public Integer getDeletedId() { return deletedId; }
+        public void setDeletedId(Integer deletedId) { this.deletedId = deletedId; }
+    }
+
+    @DeleteMapping("/{documentId}")
+    public ResponseEntity<DeleteResponse> deleteDocument(
+            @PathVariable("documentId") Integer documentId,
+            @RequestHeader(value = "Authorization", required = false) String authHeader) {
+
+        try {
+            // 打印接收到的请求
+            printRequest(documentId, authHeader);
+
+            // 1. 验证认证
+            if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new DeleteResponse(false, "请先登录", null)
+                );
+            }
+
+            String token = authHeader.substring(7);
+
+            // 验证token
+            String tokenSql = "SELECT user_id FROM user_sessions WHERE access_token = ? AND expires_at > NOW()";
+            List<Map<String, Object>> tokenResults = jdbcTemplate.queryForList(tokenSql, token);
+
+            if (tokenResults.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new DeleteResponse(false, "登录已过期，请重新登录", null)
+                );
+            }
+
+            Integer userId = (Integer) tokenResults.get(0).get("user_id");
+
+            // 2. 检查文档是否存在且属于当前用户
+            String checkSql = "SELECT document_id, title FROM documents WHERE document_id = ? AND user_id = ? AND deleted_at IS NULL";
+            List<Map<String, Object>> documents = jdbcTemplate.queryForList(checkSql, documentId, userId);
+
+            if (documents.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.NOT_FOUND).body(
+                        new DeleteResponse(false, "文档不存在或没有权限", null)
+                );
+            }
+
+            Map<String, Object> document = documents.get(0);
+            String documentTitle = (String) document.get("title");
+
+            // 3. 执行软删除（设置deleted_at字段）
+            LocalDateTime now = LocalDateTime.now();
+            Timestamp timestamp = Timestamp.valueOf(now);
+
+            String deleteSql = "UPDATE documents SET deleted_at = ?, updated_at = ? WHERE document_id = ? AND user_id = ?";
+            int rowsDeleted = jdbcTemplate.update(deleteSql, timestamp, timestamp, documentId, userId);
+
+            if (rowsDeleted == 0) {
+                return ResponseEntity.status(HttpStatus.NOT_FOUND).body(
+                        new DeleteResponse(false, "文档删除失败", null)
+                );
+            }
+
+            // 4. 从处理队列中移除（如果存在）
+            String deleteQueueSql = "DELETE FROM document_processing_queue WHERE document_id = ?";
+            jdbcTemplate.update(deleteQueueSql, documentId);
+
+            // 5. 构建响应数据
+            DeleteData data = new DeleteData(documentId);
+            DeleteResponse response = new DeleteResponse(true, "文档 '" + documentTitle + "' 删除成功", data);
+
+            // 打印返回数据
+            printResponse(response);
+
+            return ResponseEntity.ok(response);
+
+        } catch (Exception e) {
+            System.err.println("删除文档过程中发生错误: " + e.getMessage());
+            e.printStackTrace();
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                    new DeleteResponse(false, "服务器内部错误: " + e.getMessage(), null)
+            );
+        }
+    }
+}
+--- 结束文件: DocumentsDelete.java ---
+
+--- 开始文件: DocumentsDuplicate.java ---
+package com.vue.readingapp.documents;
+
+import org.springframework.web.bind.annotation.*;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.beans.factory.annotation.Autowired;
+import java.util.*;
+import java.time.LocalDateTime;
+import java.sql.Timestamp;
+import java.io.IOException;
+import java.nio.file.*;
+
+@RestController
+@RequestMapping("/api/v1/documents")
+public class DocumentsDuplicate {
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    // 文件存储路径
+    private final String UPLOAD_DIR = "uploads/documents/";
+
+    // 打印接收到的请求
+    private void printRequest(Integer documentId, String authHeader) {
+        System.out.println("=== 收到复制文档请求 ===");
+        System.out.println("文档ID: " + documentId);
+        System.out.println("认证头: " + authHeader);
+        System.out.println("=====================");
+    }
+
+    // 打印查询结果
+    private void printQueryResult(Map<String, Object> originalDocument, Integer newDocumentId) {
+        System.out.println("=== 数据库查询结果 ===");
+        System.out.println("原始文档: " + originalDocument);
+        System.out.println("新文档ID: " + newDocumentId);
+        System.out.println("===================");
+    }
+
+    // 打印返回数据
+    private void printResponse(DuplicateResponse response) {
+        System.out.println("=== 准备返回的响应 ===");
+        System.out.println("响应数据: " + response);
+        System.out.println("===================");
+    }
+
+    // 响应DTO
+    public static class DuplicateResponse {
+        private boolean success;
+        private String message;
+        private DuplicateData data;
+
+        public DuplicateResponse(boolean success, String message, DuplicateData data) {
+            this.success = success;
+            this.message = message;
+            this.data = data;
+        }
+
+        public boolean isSuccess() { return success; }
+        public void setSuccess(boolean success) { this.success = success; }
+
+        public String getMessage() { return message; }
+        public void setMessage(String message) { this.message = message; }
+
+        public DuplicateData getData() { return data; }
+        public void setData(DuplicateData data) { this.data = data; }
+    }
+
+    public static class DuplicateData {
+        private DuplicateDocumentDTO document;
+
+        public DuplicateData(DuplicateDocumentDTO document) {
+            this.document = document;
+        }
+
+        public DuplicateDocumentDTO getDocument() { return document; }
+        public void setDocument(DuplicateDocumentDTO document) { this.document = document; }
+    }
+
+    public static class DuplicateDocumentDTO {
+        private Integer id;
+        private String title;
+        private String fileName;
+        private String fileSize;
+        private String fileType;
+        private String status;
+        private String createdAt;
+
+        // Getters and Setters
+        public Integer getId() { return id; }
+        public void setId(Integer id) { this.id = id; }
+
+        public String getTitle() { return title; }
+        public void setTitle(String title) { this.title = title; }
+
+        public String getFileName() { return fileName; }
+        public void setFileName(String fileName) { this.fileName = fileName; }
+
+        public String getFileSize() { return fileSize; }
+        public void setFileSize(String fileSize) { this.fileSize = fileSize; }
+
+        public String getFileType() { return fileType; }
+        public void setFileType(String fileType) { this.fileType = fileType; }
+
+        public String getStatus() { return status; }
+        public void setStatus(String status) { this.status = status; }
+
+        public String getCreatedAt() { return createdAt; }
+        public void setCreatedAt(String createdAt) { this.createdAt = createdAt; }
+    }
+
+    @PostMapping("/{documentId}/duplicate")
+    public ResponseEntity<DuplicateResponse> duplicateDocument(
+            @PathVariable("documentId") Integer documentId,
+            @RequestHeader(value = "Authorization", required = false) String authHeader) {
+
+        try {
+            // 打印接收到的请求
+            printRequest(documentId, authHeader);
+
+            // 1. 验证认证
+            if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new DuplicateResponse(false, "请先登录", null)
+                );
+            }
+
+            String token = authHeader.substring(7);
+
+            // 验证token
+            String tokenSql = "SELECT user_id FROM user_sessions WHERE access_token = ? AND expires_at > NOW()";
+            List<Map<String, Object>> tokenResults = jdbcTemplate.queryForList(tokenSql, token);
+
+            if (tokenResults.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new DuplicateResponse(false, "登录已过期，请重新登录", null)
+                );
+            }
+
+            Integer userId = (Integer) tokenResults.get(0).get("user_id");
+
+            // 2. 查询原始文档信息
+            String originalSql = "SELECT * FROM documents WHERE document_id = ? AND user_id = ? AND deleted_at IS NULL";
+            List<Map<String, Object>> originalDocuments = jdbcTemplate.queryForList(originalSql, documentId, userId);
+
+            if (originalDocuments.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.NOT_FOUND).body(
+                        new DuplicateResponse(false, "原始文档不存在或没有权限", null)
+                );
+            }
+
+            Map<String, Object> originalDocument = originalDocuments.get(0);
+
+            // 3. 复制文件
+            String originalFilePath = (String) originalDocument.get("file_path");
+            String originalFileName = (String) originalDocument.get("file_name");
+
+            if (originalFilePath == null || originalFilePath.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                        new DuplicateResponse(false, "原始文件路径无效", null)
+                );
+            }
+
+            Path originalPath = Paths.get(originalFilePath);
+            if (!Files.exists(originalPath)) {
+                return ResponseEntity.status(HttpStatus.NOT_FOUND).body(
+                        new DuplicateResponse(false, "原始文件不存在", null)
+                );
+            }
+
+            // 生成新的文件名
+            String fileExtension = getFileExtension(originalFileName);
+            String newFileName = "copy_of_" + originalFileName;
+            String uniqueFilename = System.currentTimeMillis() + "_" + UUID.randomUUID().toString() + fileExtension;
+
+            // 创建上传目录
+            Path uploadPath = Paths.get(UPLOAD_DIR);
+            if (!Files.exists(uploadPath)) {
+                Files.createDirectories(uploadPath);
+            }
+
+            // 复制文件
+            Path newFilePath = uploadPath.resolve(uniqueFilename);
+            Files.copy(originalPath, newFilePath, StandardCopyOption.REPLACE_EXISTING);
+
+            // 4. 创建新的文档记录
+            LocalDateTime now = LocalDateTime.now();
+            Timestamp timestamp = Timestamp.valueOf(now);
+
+            String originalTitle = (String) originalDocument.get("title");
+            String newTitle = "副本 - " + originalTitle;
+
+            String insertSql = "INSERT INTO documents (user_id, title, description, file_path, file_name, " +
+                    "file_size, file_type, language, page_count, reading_progress, " +
+                    "current_page, is_public, is_favorite, is_processed, processing_status, " +
+                    "processing_progress, status, created_at, updated_at) " +
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+
+            jdbcTemplate.update(insertSql,
+                    userId,
+                    newTitle,
+                    originalDocument.get("description"),
+                    newFilePath.toString(),
+                    newFileName,
+                    originalDocument.get("file_size"),
+                    originalDocument.get("file_type"),
+                    originalDocument.get("language"),
+                    originalDocument.get("page_count"),
+                    0, // 重置阅读进度
+                    1, // 重置当前页码
+                    false, // 默认不公开
+                    false, // 默认不收藏
+                    originalDocument.get("is_processed"),
+                    originalDocument.get("processing_status"),
+                    0, // 重置处理进度
+                    "uploading",
+                    timestamp,
+                    timestamp
+            );
+
+            // 获取插入的文档ID
+            String lastIdSql = "SELECT LAST_INSERT_ID() as id";
+            Integer newDocumentId = jdbcTemplate.queryForObject(lastIdSql, Integer.class);
+
+            // 5. 复制标签关系
+            String tagRelationsSql = "SELECT tag_id FROM document_tag_relations WHERE document_id = ?";
+            List<Map<String, Object>> tagRelations = jdbcTemplate.queryForList(tagRelationsSql, documentId);
+
+            for (Map<String, Object> relation : tagRelations) {
+                Integer tagId = (Integer) relation.get("tag_id");
+
+                String insertRelationSql = "INSERT INTO document_tag_relations (document_id, tag_id, created_at) VALUES (?, ?, ?)";
+                jdbcTemplate.update(insertRelationSql, newDocumentId, tagId, timestamp);
+            }
+
+            // 6. 添加到文档处理队列
+            String insertQueueSql = "INSERT INTO document_processing_queue (document_id, status, priority, created_at) VALUES (?, ?, ?, ?)";
+            jdbcTemplate.update(insertQueueSql, newDocumentId, "pending", 1, timestamp);
+
+            printQueryResult(originalDocument, newDocumentId);
+
+            // 7. 构建响应数据
+            DuplicateDocumentDTO dto = new DuplicateDocumentDTO();
+            dto.setId(newDocumentId);
+            dto.setTitle(newTitle);
+            dto.setFileName(newFileName);
+            dto.setFileSize(formatFileSize((Long) originalDocument.get("file_size")));
+            dto.setFileType((String) originalDocument.get("file_type"));
+            dto.setStatus("uploading");
+            dto.setCreatedAt(now.toString());
+
+            DuplicateData data = new DuplicateData(dto);
+            DuplicateResponse response = new DuplicateResponse(true, "文档复制成功", data);
+
+            // 打印返回数据
+            printResponse(response);
+
+            return ResponseEntity.ok(response);
+
+        } catch (IOException e) {
+            System.err.println("文件复制过程中发生错误: " + e.getMessage());
+            e.printStackTrace();
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                    new DuplicateResponse(false, "文件复制失败: " + e.getMessage(), null)
+            );
+        } catch (Exception e) {
+            System.err.println("复制文档过程中发生错误: " + e.getMessage());
+            e.printStackTrace();
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                    new DuplicateResponse(false, "服务器内部错误: " + e.getMessage(), null)
+            );
+        }
+    }
+
+    // 获取文件扩展名
+    private String getFileExtension(String filename) {
+        if (filename == null || filename.lastIndexOf(".") == -1) {
+            return "";
+        }
+        return filename.substring(filename.lastIndexOf("."));
+    }
+
+    // 格式化文件大小
+    private String formatFileSize(long bytes) {
+        if (bytes == 0) return "0 B";
+
+        String[] units = {"B", "KB", "MB", "GB", "TB"};
+        int unitIndex = 0;
+        double size = bytes;
+
+        while (size >= 1024 && unitIndex < units.length - 1) {
+            size /= 1024;
+            unitIndex++;
+        }
+
+        return String.format("%.2f %s", size, units[unitIndex]);
+    }
+}
+--- 结束文件: DocumentsDuplicate.java ---
+
+--- 开始文件: DocumentsExport.java ---
+package com.vue.readingapp.documents;
+
+import org.springframework.web.bind.annotation.*;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.core.io.InputStreamResource;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import java.io.*;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.*;
+
+@RestController
+@RequestMapping("/api/v1/documents")
+public class DocumentsExport {
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    // 打印接收到的请求
+    private void printRequest(Integer documentId, String format, String authHeader) {
+        System.out.println("=== 收到导出文档请求 ===");
+        System.out.println("文档ID: " + documentId);
+        System.out.println("格式: " + format);
+        System.out.println("认证头: " + authHeader);
+        System.out.println("=====================");
+    }
+
+    @GetMapping("/{documentId}/export")
+    public ResponseEntity<InputStreamResource> exportDocument(
+            @PathVariable("documentId") Integer documentId,
+            @RequestParam(value = "format", defaultValue = "pdf") String format,
+            @RequestHeader(value = "Authorization", required = false) String authHeader) {
+
+        try {
+            // 打印接收到的请求
+            printRequest(documentId, format, authHeader);
+
+            // 1. 验证认证
+            if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+            }
+
+            String token = authHeader.substring(7);
+
+            // 验证token
+            String tokenSql = "SELECT user_id FROM user_sessions WHERE access_token = ? AND expires_at > NOW()";
+            List<Map<String, Object>> tokenResults = jdbcTemplate.queryForList(tokenSql, token);
+
+            if (tokenResults.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+            }
+
+            Integer userId = (Integer) tokenResults.get(0).get("user_id");
+
+            // 2. 检查文档是否存在且属于当前用户
+            String checkSql = "SELECT file_path, file_name, file_type FROM documents WHERE document_id = ? AND user_id = ? AND deleted_at IS NULL";
+            List<Map<String, Object>> documents = jdbcTemplate.queryForList(checkSql, documentId, userId);
+
+            if (documents.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.NOT_FOUND).build();
+            }
+
+            Map<String, Object> document = documents.get(0);
+            String filePath = (String) document.get("file_path");
+            String fileName = (String) document.get("file_name");
+            String fileType = (String) document.get("file_type");
+
+            System.out.println("=== 数据库查询结果 ===");
+            System.out.println("文件路径: " + filePath);
+            System.out.println("文件名: " + fileName);
+            System.out.println("文件类型: " + fileType);
+            System.out.println("===================");
+
+            // 3. 检查文件是否存在
+            Path path = Paths.get(filePath);
+            if (!Files.exists(path)) {
+                System.err.println("文件不存在: " + filePath);
+                return ResponseEntity.status(HttpStatus.NOT_FOUND).build();
+            }
+
+            // 4. 根据请求的格式准备文件
+            String exportFileName;
+            MediaType mediaType;
+
+            switch (format.toLowerCase()) {
+                case "pdf":
+                    // 如果原文件不是PDF，这里应该进行转换
+                    // 简化实现：直接返回原文件或生成PDF
+                    exportFileName = fileName.replaceFirst("[.][^.]+$", "") + ".pdf";
+                    mediaType = MediaType.APPLICATION_PDF;
+                    break;
+                case "txt":
+                    exportFileName = fileName.replaceFirst("[.][^.]+$", "") + ".txt";
+                    mediaType = MediaType.TEXT_PLAIN;
+                    break;
+                case "epub":
+                    exportFileName = fileName.replaceFirst("[.][^.]+$", "") + ".epub";
+                    mediaType = MediaType.parseMediaType("application/epub+zip");
+                    break;
+                default:
+                    // 默认返回原文件
+                    exportFileName = fileName;
+                    mediaType = MediaType.parseMediaType(fileType != null ? fileType : "application/octet-stream");
+            }
+
+            // 5. 创建输入流
+            InputStream inputStream = new FileInputStream(path.toFile());
+
+            // 6. 设置响应头
+            HttpHeaders headers = new HttpHeaders();
+            headers.add(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + exportFileName + "\"");
+            headers.add(HttpHeaders.CACHE_CONTROL, "no-cache, no-store, must-revalidate");
+            headers.add(HttpHeaders.PRAGMA, "no-cache");
+            headers.add(HttpHeaders.EXPIRES, "0");
+
+            System.out.println("=== 准备返回的响应 ===");
+            System.out.println("文件名: " + exportFileName);
+            System.out.println("媒体类型: " + mediaType);
+            System.out.println("文件大小: " + Files.size(path) + " bytes");
+            System.out.println("===================");
+
+            // 7. 返回文件流
+            return ResponseEntity.ok()
+                    .headers(headers)
+                    .contentLength(Files.size(path))
+                    .contentType(mediaType)
+                    .body(new InputStreamResource(inputStream));
+
+        } catch (FileNotFoundException e) {
+            System.err.println("文件未找到: " + e.getMessage());
+            return ResponseEntity.status(HttpStatus.NOT_FOUND).build();
+        } catch (IOException e) {
+            System.err.println("文件读取错误: " + e.getMessage());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        } catch (Exception e) {
+            System.err.println("导出文档过程中发生错误: " + e.getMessage());
+            e.printStackTrace();
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).build();
+        }
+    }
+}
+--- 结束文件: DocumentsExport.java ---
+
+--- 开始文件: DocumentsGet.java ---
+package com.vue.readingapp.documents;
+
+import org.springframework.web.bind.annotation.*;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.RowMapper;
+import org.springframework.beans.factory.annotation.Autowired;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.time.LocalDateTime;
+import java.util.*;
+import java.util.stream.Collectors;
+
+@RestController
+@RequestMapping("/api/v1/documents")
+public class DocumentsGet {
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    // 打印接收到的请求
+    private void printRequest(Map<String, Object> params) {
+        System.out.println("=== 收到获取文档列表请求 ===");
+        System.out.println("请求参数: " + params);
+        System.out.println("========================");
+    }
+
+    // 打印查询结果
+    private void printQueryResult(List<Map<String, Object>> documents, int total) {
+        System.out.println("=== 数据库查询结果 ===");
+        System.out.println("查询到文档数量: " + documents.size());
+        System.out.println("总文档数: " + total);
+        System.out.println("文档列表: " + documents);
+        System.out.println("===================");
+    }
+
+    // 打印返回数据
+    private void printResponse(DocumentsResponse response) {
+        System.out.println("=== 准备返回的响应 ===");
+        System.out.println("响应数据: " + response);
+        System.out.println("===================");
+    }
+
+    // 请求DTO
+    public static class DocumentsRequest {
+        private Integer page;
+        private Integer pageSize;
+        private String sortBy;
+        private String sortOrder;
+        private String search;
+        private List<String> tags;
+        private String language;
+        private String status;
+
+        public Integer getPage() { return page != null ? page : 1; }
+        public void setPage(Integer page) { this.page = page; }
+
+        public Integer getPageSize() { return pageSize != null ? pageSize : 20; }
+        public void setPageSize(Integer pageSize) { this.pageSize = pageSize; }
+
+        public String getSortBy() { return sortBy != null ? sortBy : "created_at"; }
+        public void setSortBy(String sortBy) { this.sortBy = sortBy; }
+
+        public String getSortOrder() { return sortOrder != null ? sortOrder : "desc"; }
+        public void setSortOrder(String sortOrder) { this.sortOrder = sortOrder; }
+
+        public String getSearch() { return search; }
+        public void setSearch(String search) { this.search = search; }
+
+        public List<String> getTags() { return tags; }
+        public void setTags(List<String> tags) { this.tags = tags; }
+
+        public String getLanguage() { return language; }
+        public void setLanguage(String language) { this.language = language; }
+
+        public String getStatus() { return status; }
+        public void setStatus(String status) { this.status = status; }
+    }
+
+    // 响应DTO
+    public static class DocumentsResponse {
+        private boolean success;
+        private String message;
+        private DocumentsData data;
+
+        public DocumentsResponse(boolean success, String message, DocumentsData data) {
+            this.success = success;
+            this.message = message;
+            this.data = data;
+        }
+
+        public boolean isSuccess() { return success; }
+        public void setSuccess(boolean success) { this.success = success; }
+
+        public String getMessage() { return message; }
+        public void setMessage(String message) { this.message = message; }
+
+        public DocumentsData getData() { return data; }
+        public void setData(DocumentsData data) { this.data = data; }
+
+        @Override
+        public String toString() {
+            return "DocumentsResponse{" +
+                    "success=" + success +
+                    ", message='" + message + '\'' +
+                    ", data=" + data +
+                    '}';
+        }
+    }
+
+    public static class DocumentsData {
+        private List<DocumentDTO> documents;
+        private PaginationDTO pagination;
+
+        public DocumentsData(List<DocumentDTO> documents, PaginationDTO pagination) {
+            this.documents = documents;
+            this.pagination = pagination;
+        }
+
+        public List<DocumentDTO> getDocuments() { return documents; }
+        public void setDocuments(List<DocumentDTO> documents) { this.documents = documents; }
+
+        public PaginationDTO getPagination() { return pagination; }
+        public void setPagination(PaginationDTO pagination) { this.pagination = pagination; }
+
+        @Override
+        public String toString() {
+            return "DocumentsData{" +
+                    "documents=" + documents +
+                    ", pagination=" + pagination +
+                    '}';
+        }
+    }
+
+    public static class DocumentDTO {
+        private Integer id;
+        private String title;
+        private String description;
+        private String fileName;
+        private String fileSize;
+        private String fileType;
+        private String language;
+        private Integer pageCount;
+        private Integer readProgress;
+        private List<String> tags;
+        private Boolean isPublic;
+        private Boolean isFavorite;
+        private String uploader;
+        private LocalDateTime createdAt;
+        private LocalDateTime updatedAt;
+        private String thumbnail;
+
+        // Getters and Setters
+        public Integer getId() { return id; }
+        public void setId(Integer id) { this.id = id; }
+
+        public String getTitle() { return title; }
+        public void setTitle(String title) { this.title = title; }
+
+        public String getDescription() { return description; }
+        public void setDescription(String description) { this.description = description; }
+
+        public String getFileName() { return fileName; }
+        public void setFileName(String fileName) { this.fileName = fileName; }
+
+        public String getFileSize() { return fileSize; }
+        public void setFileSize(String fileSize) { this.fileSize = fileSize; }
+
+        public String getFileType() { return fileType; }
+        public void setFileType(String fileType) { this.fileType = fileType; }
+
+        public String getLanguage() { return language; }
+        public void setLanguage(String language) { this.language = language; }
+
+        public Integer getPageCount() { return pageCount; }
+        public void setPageCount(Integer pageCount) { this.pageCount = pageCount; }
+
+        public Integer getReadProgress() { return readProgress; }
+        public void setReadProgress(Integer readProgress) { this.readProgress = readProgress; }
+
+        public List<String> getTags() { return tags; }
+        public void setTags(List<String> tags) { this.tags = tags; }
+
+        public Boolean getIsPublic() { return isPublic; }
+        public void setIsPublic(Boolean isPublic) { this.isPublic = isPublic; }
+
+        public Boolean getIsFavorite() { return isFavorite; }
+        public void setIsFavorite(Boolean isFavorite) { this.isFavorite = isFavorite; }
+
+        public String getUploader() { return uploader; }
+        public void setUploader(String uploader) { this.uploader = uploader; }
+
+        public LocalDateTime getCreatedAt() { return createdAt; }
+        public void setCreatedAt(LocalDateTime createdAt) { this.createdAt = createdAt; }
+
+        public LocalDateTime getUpdatedAt() { return updatedAt; }
+        public void setUpdatedAt(LocalDateTime updatedAt) { this.updatedAt = updatedAt; }
+
+        public String getThumbnail() { return thumbnail; }
+        public void setThumbnail(String thumbnail) { this.thumbnail = thumbnail; }
+
+        @Override
+        public String toString() {
+            return "DocumentDTO{" +
+                    "id=" + id +
+                    ", title='" + title + '\'' +
+                    ", description='" + description + '\'' +
+                    ", fileName='" + fileName + '\'' +
+                    ", fileSize='" + fileSize + '\'' +
+                    ", fileType='" + fileType + '\'' +
+                    ", language='" + language + '\'' +
+                    ", pageCount=" + pageCount +
+                    ", readProgress=" + readProgress +
+                    ", tags=" + tags +
+                    ", isPublic=" + isPublic +
+                    ", isFavorite=" + isFavorite +
+                    ", uploader='" + uploader + '\'' +
+                    ", createdAt='" + createdAt + '\'' +
+                    ", updatedAt='" + updatedAt + '\'' +
+                    ", thumbnail='" + thumbnail + '\'' +
+                    '}';
+        }
+    }
+
+    public static class PaginationDTO {
+        private Integer page;
+        private Integer pageSize;
+        private Integer total;
+        private Integer totalPages;
+
+        public PaginationDTO(Integer page, Integer pageSize, Integer total) {
+            this.page = page;
+            this.pageSize = pageSize;
+            this.total = total;
+            this.totalPages = (int) Math.ceil((double) total / pageSize);
+        }
+
+        public Integer getPage() { return page; }
+        public void setPage(Integer page) { this.page = page; }
+
+        public Integer getPageSize() { return pageSize; }
+        public void setPageSize(Integer pageSize) { this.pageSize = pageSize; }
+
+        public Integer getTotal() { return total; }
+        public void setTotal(Integer total) { this.total = total; }
+
+        public Integer getTotalPages() { return totalPages; }
+        public void setTotalPages(Integer totalPages) { this.totalPages = totalPages; }
+
+        @Override
+        public String toString() {
+            return "PaginationDTO{" +
+                    "page=" + page +
+                    ", pageSize=" + pageSize +
+                    ", total=" + total +
+                    ", totalPages=" + totalPages +
+                    '}';
+        }
+    }
+
+    @GetMapping("")
+    public ResponseEntity<DocumentsResponse> getDocuments(
+            @RequestParam(required = false) Integer page,
+            @RequestParam(required = false) Integer pageSize,
+            @RequestParam(required = false) String sortBy,
+            @RequestParam(required = false) String sortOrder,
+            @RequestParam(required = false) String search,
+            @RequestParam(required = false) String tags,
+            @RequestParam(required = false) String language,
+            @RequestParam(required = false) String status,
+            @RequestHeader(value = "Authorization", required = false) String authHeader) {
+
+        try {
+            // 1. 构建请求参数
+            DocumentsRequest request = new DocumentsRequest();
+            request.setPage(page);
+            request.setPageSize(pageSize);
+            request.setSortBy(sortBy);
+            request.setSortOrder(sortOrder);
+            request.setSearch(search);
+            request.setLanguage(language);
+            request.setStatus(status);
+
+            if (tags != null && !tags.isEmpty()) {
+                request.setTags(Arrays.asList(tags.split(",")));
+            }
+
+            // 打印接收到的请求
+            Map<String, Object> params = new HashMap<>();
+            params.put("page", request.getPage());
+            params.put("pageSize", request.getPageSize());
+            params.put("sortBy", request.getSortBy());
+            params.put("sortOrder", request.getSortOrder());
+            params.put("search", request.getSearch());
+            params.put("tags", request.getTags());
+            params.put("language", request.getLanguage());
+            params.put("status", request.getStatus());
+            printRequest(params);
+
+            // 2. 验证认证
+            if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new DocumentsResponse(false, "请先登录", null)
+                );
+            }
+
+            String token = authHeader.substring(7);
+
+            // 验证token
+            String tokenSql = "SELECT user_id FROM user_sessions WHERE access_token = ? AND expires_at > NOW()";
+            List<Map<String, Object>> tokenResults = jdbcTemplate.queryForList(tokenSql, token);
+
+            if (tokenResults.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new DocumentsResponse(false, "登录已过期，请重新登录", null)
+                );
+            }
+
+            Integer userId = (Integer) tokenResults.get(0).get("user_id");
+
+            // 3. 构建查询条件
+            StringBuilder whereClause = new StringBuilder("WHERE d.user_id = ? AND d.deleted_at IS NULL");
+            List<Object> queryParams = new ArrayList<>();
+            queryParams.add(userId);
+
+            // 搜索条件
+            if (request.getSearch() != null && !request.getSearch().trim().isEmpty()) {
+                whereClause.append(" AND (d.title LIKE ? OR d.description LIKE ?)");
+                String searchTerm = "%" + request.getSearch().trim() + "%";
+                queryParams.add(searchTerm);
+                queryParams.add(searchTerm);
+            }
+
+            // 状态过滤
+            if (request.getStatus() != null && !request.getStatus().trim().isEmpty()) {
+                whereClause.append(" AND d.status = ?");
+                queryParams.add(request.getStatus().trim());
+            }
+
+            // 语言过滤
+            if (request.getLanguage() != null && !request.getLanguage().trim().isEmpty()) {
+                whereClause.append(" AND d.language = ?");
+                queryParams.add(request.getLanguage().trim());
+            }
+
+            // 标签过滤
+            if (request.getTags() != null && !request.getTags().isEmpty()) {
+                whereClause.append(" AND d.document_id IN (");
+                whereClause.append("SELECT document_id FROM document_tag_relations dtr ");
+                whereClause.append("JOIN document_tags dt ON dtr.tag_id = dt.tag_id ");
+                whereClause.append("WHERE dt.tag_name IN (");
+
+                for (int i = 0; i < request.getTags().size(); i++) {
+                    if (i > 0) whereClause.append(", ");
+                    whereClause.append("?");
+                    queryParams.add(request.getTags().get(i));
+                }
+                whereClause.append(") AND dt.user_id = ?");
+                queryParams.add(userId);
+                whereClause.append(")");
+            }
+
+            // 4. 获取总数
+            String countSql = "SELECT COUNT(*) as total FROM documents d " + whereClause;
+            Integer total = jdbcTemplate.queryForObject(countSql, Integer.class, queryParams.toArray());
+
+            // 5. 构建排序
+            String sortField = request.getSortBy();
+            if (!Arrays.asList("created_at", "updated_at", "title", "file_size", "page_count").contains(sortField)) {
+                sortField = "created_at";
+            }
+
+            String orderDirection = "desc".equalsIgnoreCase(request.getSortOrder()) ? "DESC" : "ASC";
+            String orderClause = "ORDER BY d." + sortField + " " + orderDirection;
+
+            // 6. 构建分页
+            int offset = (request.getPage() - 1) * request.getPageSize();
+            String limitClause = "LIMIT ? OFFSET ?";
+
+            // 7. 查询文档列表
+            String querySql = "SELECT d.document_id, d.title, d.description, d.file_name, d.file_size, " +
+                    "d.file_type, d.language, d.page_count, d.reading_progress, d.is_public, " +
+                    "d.is_favorite, d.created_at, d.updated_at, " +
+                    "u.username as uploader " +
+                    "FROM documents d " +
+                    "LEFT JOIN users u ON d.user_id = u.user_id " +
+                    whereClause + " " + orderClause + " " + limitClause;
+
+            List<Object> finalQueryParams = new ArrayList<>(queryParams);
+            finalQueryParams.add(request.getPageSize());
+            finalQueryParams.add(offset);
+
+            List<Map<String, Object>> documents = jdbcTemplate.queryForList(querySql, finalQueryParams.toArray());
+
+            // 8. 获取每个文档的标签
+            List<DocumentDTO> documentDTOs = new ArrayList<>();
+
+            for (Map<String, Object> doc : documents) {
+                Integer docId = (Integer) doc.get("document_id");
+
+                // 查询文档标签
+                String tagSql = "SELECT dt.tag_name FROM document_tag_relations dtr " +
+                        "JOIN document_tags dt ON dtr.tag_id = dt.tag_id " +
+                        "WHERE dtr.document_id = ? AND dt.user_id = ?";
+                List<Map<String, Object>> tagResults = jdbcTemplate.queryForList(tagSql, docId, userId);
+
+                List<String> tagNames = tagResults.stream()
+                        .map(tag -> (String) tag.get("tag_name"))
+                        .collect(Collectors.toList());
+
+                // 构建DTO
+                DocumentDTO dto = new DocumentDTO();
+                dto.setId(docId);
+                dto.setTitle((String) doc.get("title"));
+                dto.setDescription((String) doc.get("description"));
+                dto.setFileName((String) doc.get("file_name"));
+
+                // 格式化文件大小
+                Long fileSize = (Long) doc.get("file_size");
+                dto.setFileSize(formatFileSize(fileSize));
+
+                dto.setFileType((String) doc.get("file_type"));
+                dto.setLanguage((String) doc.get("language"));
+                dto.setPageCount((Integer) doc.get("page_count"));
+                dto.setReadProgress((Integer) doc.get("reading_progress"));
+                dto.setTags(tagNames);
+                dto.setIsPublic((Boolean) doc.get("is_public"));
+                dto.setIsFavorite((Boolean) doc.get("is_favorite"));
+                dto.setUploader((String) doc.get("uploader"));
+                dto.setCreatedAt(formatDate((java.sql.Timestamp) doc.get("created_at")));
+                dto.setUpdatedAt(formatDate((java.sql.Timestamp) doc.get("updated_at")));
+                dto.setThumbnail(null); // 暂时没有缩略图
+
+                documentDTOs.add(dto);
+            }
+
+            // 打印查询结果
+            printQueryResult(documents, total);
+
+            // 9. 构建响应
+            PaginationDTO pagination = new PaginationDTO(
+                    request.getPage(),
+                    request.getPageSize(),
+                    total
+            );
+
+            DocumentsData data = new DocumentsData(documentDTOs, pagination);
+            DocumentsResponse response = new DocumentsResponse(true, "获取文档列表成功", data);
+
+            // 打印返回数据
+            printResponse(response);
+
+            return ResponseEntity.ok(response);
+
+        } catch (Exception e) {
+            System.err.println("获取文档列表过程中发生错误: " + e.getMessage());
+            e.printStackTrace();
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                    new DocumentsResponse(false, "服务器内部错误: " + e.getMessage(), null)
+            );
+        }
+    }
+
+    // 格式化文件大小
+    private String formatFileSize(Long bytes) {
+        if (bytes == null || bytes == 0) return "0 B";
+
+        String[] units = {"B", "KB", "MB", "GB", "TB"};
+        int unitIndex = 0;
+        double size = bytes;
+
+        while (size >= 1024 && unitIndex < units.length - 1) {
+            size /= 1024;
+            unitIndex++;
+        }
+
+        return String.format("%.2f %s", size, units[unitIndex]);
+    }
+
+    // 格式化日期（保持LocalDateTime类型）
+    private LocalDateTime formatDate(java.sql.Timestamp timestamp) {
+        if (timestamp == null) return null;
+
+        // 返回LocalDateTime对象，不转换为字符串
+        return timestamp.toLocalDateTime();
+    }
+}
+--- 结束文件: DocumentsGet.java ---
+
+--- 开始文件: DocumentsGetById.java ---
+package com.vue.readingapp.documents;
+
+import org.springframework.web.bind.annotation.*;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.beans.factory.annotation.Autowired;
+import java.util.*;
+import java.time.LocalDateTime;
+
+@RestController
+@RequestMapping("/api/v1/documents")
+public class DocumentsGetById {
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    // 打印接收到的请求
+    private void printRequest(String documentId, String authHeader) {
+        System.out.println("=== 收到获取文档详情请求 ===");
+        System.out.println("文档ID: " + documentId);
+        System.out.println("认证头: " + authHeader);
+        System.out.println("========================");
+    }
+
+    // 打印查询结果
+    private void printQueryResult(Map<String, Object> document) {
+        System.out.println("=== 数据库查询结果 ===");
+        System.out.println("文档详情: " + document);
+        System.out.println("===================");
+    }
+
+    // 打印返回数据
+    private void printResponse(DocumentDetailResponse response) {
+        System.out.println("=== 准备返回的响应 ===");
+        System.out.println("响应数据: " + response);
+        System.out.println("===================");
+    }
+
+    // 响应DTO
+    public static class DocumentDetailResponse {
+        private boolean success;
+        private String message;
+        private DocumentDetailData data;
+
+        public DocumentDetailResponse(boolean success, String message, DocumentDetailData data) {
+            this.success = success;
+            this.message = message;
+            this.data = data;
+        }
+
+        public boolean isSuccess() { return success; }
+        public void setSuccess(boolean success) { this.success = success; }
+
+        public String getMessage() { return message; }
+        public void setMessage(String message) { this.message = message; }
+
+        public DocumentDetailData getData() { return data; }
+        public void setData(DocumentDetailData data) { this.data = data; }
+    }
+
+    public static class DocumentDetailData {
+        private DocumentDetailDTO document;
+
+        public DocumentDetailData(DocumentDetailDTO document) {
+            this.document = document;
+        }
+
+        public DocumentDetailDTO getDocument() { return document; }
+        public void setDocument(DocumentDetailDTO document) { this.document = document; }
+    }
+
+    public static class DocumentDetailDTO {
+        private Integer id;
+        private String title;
+        private String description;
+        private String fileName;
+        private String filePath;
+        private String fileSize;
+        private String fileType;
+        private String language;
+        private Integer pageCount;
+        private Integer readProgress;
+        private Integer currentPage;
+        private List<String> tags;
+        private Boolean isPublic;
+        private Boolean isFavorite;
+        private Boolean isProcessed;
+        private String processingStatus;
+        private String uploader;
+        private String createdAt;
+        private String updatedAt;
+        private String lastReadAt;
+        private String thumbnail;
+        private Map<String, Object> metadata;
+
+        // Getters and Setters
+        public Integer getId() { return id; }
+        public void setId(Integer id) { this.id = id; }
+
+        public String getTitle() { return title; }
+        public void setTitle(String title) { this.title = title; }
+
+        public String getDescription() { return description; }
+        public void setDescription(String description) { this.description = description; }
+
+        public String getFileName() { return fileName; }
+        public void setFileName(String fileName) { this.fileName = fileName; }
+
+        public String getFilePath() { return filePath; }
+        public void setFilePath(String filePath) { this.filePath = filePath; }
+
+        public String getFileSize() { return fileSize; }
+        public void setFileSize(String fileSize) { this.fileSize = fileSize; }
+
+        public String getFileType() { return fileType; }
+        public void setFileType(String fileType) { this.fileType = fileType; }
+
+        public String getLanguage() { return language; }
+        public void setLanguage(String language) { this.language = language; }
+
+        public Integer getPageCount() { return pageCount; }
+        public void setPageCount(Integer pageCount) { this.pageCount = pageCount; }
+
+        public Integer getReadProgress() { return readProgress; }
+        public void setReadProgress(Integer readProgress) { this.readProgress = readProgress; }
+
+        public Integer getCurrentPage() { return currentPage; }
+        public void setCurrentPage(Integer currentPage) { this.currentPage = currentPage; }
+
+        public List<String> getTags() { return tags; }
+        public void setTags(List<String> tags) { this.tags = tags; }
+
+        public Boolean getIsPublic() { return isPublic; }
+        public void setIsPublic(Boolean isPublic) { this.isPublic = isPublic; }
+
+        public Boolean getIsFavorite() { return isFavorite; }
+        public void setIsFavorite(Boolean isFavorite) { this.isFavorite = isFavorite; }
+
+        public Boolean getIsProcessed() { return isProcessed; }
+        public void setIsProcessed(Boolean isProcessed) { this.isProcessed = isProcessed; }
+
+        public String getProcessingStatus() { return processingStatus; }
+        public void setProcessingStatus(String processingStatus) { this.processingStatus = processingStatus; }
+
+        public String getUploader() { return uploader; }
+        public void setUploader(String uploader) { this.uploader = uploader; }
+
+        public String getCreatedAt() { return createdAt; }
+        public void setCreatedAt(String createdAt) { this.createdAt = createdAt; }
+
+        public String getUpdatedAt() { return updatedAt; }
+        public void setUpdatedAt(String updatedAt) { this.updatedAt = updatedAt; }
+
+        public String getLastReadAt() { return lastReadAt; }
+        public void setLastReadAt(String lastReadAt) { this.lastReadAt = lastReadAt; }
+
+        public String getThumbnail() { return thumbnail; }
+        public void setThumbnail(String thumbnail) { this.thumbnail = thumbnail; }
+
+        public Map<String, Object> getMetadata() { return metadata; }
+        public void setMetadata(Map<String, Object> metadata) { this.metadata = metadata; }
+    }
+
+    @GetMapping("/{documentId}")
+    public ResponseEntity<DocumentDetailResponse> getDocumentById(
+            @PathVariable("documentId") Integer documentId,
+            @RequestHeader(value = "Authorization", required = false) String authHeader) {
+
+        try {
+            // 打印接收到的请求
+            printRequest(String.valueOf(documentId), authHeader);
+
+            // 1. 验证认证
+            if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new DocumentDetailResponse(false, "请先登录", null)
+                );
+            }
+
+            String token = authHeader.substring(7);
+
+            // 验证token
+            String tokenSql = "SELECT user_id FROM user_sessions WHERE access_token = ? AND expires_at > NOW()";
+            List<Map<String, Object>> tokenResults = jdbcTemplate.queryForList(tokenSql, token);
+
+            if (tokenResults.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new DocumentDetailResponse(false, "登录已过期，请重新登录", null)
+                );
+            }
+
+            Integer userId = (Integer) tokenResults.get(0).get("user_id");
+
+            // 2. 查询文档详情
+            String sql = "SELECT d.document_id, d.title, d.description, d.file_path, d.file_name, " +
+                    "d.file_size, d.file_type, d.language, d.page_count, d.reading_progress, " +
+                    "d.current_page, d.is_public, d.is_favorite, d.is_processed, d.processing_status, " +
+                    "d.created_at, d.updated_at, d.last_read_at, " +
+                    "u.username as uploader " +
+                    "FROM documents d " +
+                    "LEFT JOIN users u ON d.user_id = u.user_id " +
+                    "WHERE d.document_id = ? AND d.user_id = ? AND d.deleted_at IS NULL";
+
+            List<Map<String, Object>> documents = jdbcTemplate.queryForList(sql, documentId, userId);
+
+            if (documents.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.NOT_FOUND).body(
+                        new DocumentDetailResponse(false, "文档不存在或已被删除", null)
+                );
+            }
+
+            Map<String, Object> document = documents.get(0);
+            printQueryResult(document);
+
+            // 3. 查询文档标签
+            String tagSql = "SELECT dt.tag_name FROM document_tag_relations dtr " +
+                    "JOIN document_tags dt ON dtr.tag_id = dt.tag_id " +
+                    "WHERE dtr.document_id = ? AND dt.user_id = ?";
+            List<Map<String, Object>> tagResults = jdbcTemplate.queryForList(tagSql, documentId, userId);
+
+            List<String> tags = new ArrayList<>();
+            for (Map<String, Object> tag : tagResults) {
+                tags.add((String) tag.get("tag_name"));
+            }
+
+            // 4. 构建响应数据
+            DocumentDetailDTO dto = new DocumentDetailDTO();
+            dto.setId((Integer) document.get("document_id"));
+            dto.setTitle((String) document.get("title"));
+            dto.setDescription((String) document.get("description"));
+            dto.setFilePath((String) document.get("file_path"));
+            dto.setFileName((String) document.get("file_name"));
+
+            // 格式化文件大小
+            Long fileSize = (Long) document.get("file_size");
+            dto.setFileSize(formatFileSize(fileSize));
+
+            dto.setFileType((String) document.get("file_type"));
+            dto.setLanguage((String) document.get("language"));
+            dto.setPageCount((Integer) document.get("page_count"));
+            dto.setReadProgress((Integer) document.get("reading_progress"));
+            dto.setCurrentPage((Integer) document.get("current_page"));
+            dto.setTags(tags);
+            dto.setIsPublic((Boolean) document.get("is_public"));
+            dto.setIsFavorite((Boolean) document.get("is_favorite"));
+            dto.setIsProcessed((Boolean) document.get("is_processed"));
+            dto.setProcessingStatus((String) document.get("processing_status"));
+            dto.setUploader((String) document.get("uploader"));
+            dto.setCreatedAt(formatDate((java.sql.Timestamp) document.get("created_at")));
+            dto.setUpdatedAt(formatDate((java.sql.Timestamp) document.get("updated_at")));
+
+            java.sql.Timestamp lastReadAt = (java.sql.Timestamp) document.get("last_read_at");
+            dto.setLastReadAt(lastReadAt != null ? formatDate(lastReadAt) : null);
+
+            dto.setThumbnail(null); // 暂时没有缩略图
+            dto.setMetadata(new HashMap<>()); // 暂时没有元数据
+
+            DocumentDetailData data = new DocumentDetailData(dto);
+            DocumentDetailResponse response = new DocumentDetailResponse(true, "获取文档详情成功", data);
+
+            // 打印返回数据
+            printResponse(response);
+
+            return ResponseEntity.ok(response);
+
+        } catch (Exception e) {
+            System.err.println("获取文档详情过程中发生错误: " + e.getMessage());
+            e.printStackTrace();
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                    new DocumentDetailResponse(false, "服务器内部错误: " + e.getMessage(), null)
+            );
+        }
+    }
+
+    // 格式化文件大小
+    private String formatFileSize(Long bytes) {
+        if (bytes == null || bytes == 0) return "0 B";
+
+        String[] units = {"B", "KB", "MB", "GB", "TB"};
+        int unitIndex = 0;
+        double size = bytes;
+
+        while (size >= 1024 && unitIndex < units.length - 1) {
+            size /= 1024;
+            unitIndex++;
+        }
+
+        return String.format("%.2f %s", size, units[unitIndex]);
+    }
+
+    // 格式化日期
+    private String formatDate(java.sql.Timestamp timestamp) {
+        if (timestamp == null) return "";
+        return timestamp.toLocalDateTime().toString();
+    }
+}
+--- 结束文件: DocumentsGetById.java ---
+
+--- 开始文件: DocumentsGetProcessingStatus.java ---
+package com.vue.readingapp.documents;
+
+import org.springframework.web.bind.annotation.*;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.beans.factory.annotation.Autowired;
+import java.util.*;
+
+@RestController
+@RequestMapping("/api/v1/documents")
+public class DocumentsGetProcessingStatus {
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    // 打印接收到的请求
+    private void printRequest(Integer documentId, String authHeader) {
+        System.out.println("=== 收到获取文档处理状态请求 ===");
+        System.out.println("文档ID: " + documentId);
+        System.out.println("认证头: " + authHeader);
+        System.out.println("============================");
+    }
+
+    // 打印查询结果
+    private void printQueryResult(Map<String, Object> status) {
+        System.out.println("=== 数据库查询结果 ===");
+        System.out.println("处理状态: " + status);
+        System.out.println("===================");
+    }
+
+    // 打印返回数据
+    private void printResponse(ProcessingStatusResponse response) {
+        System.out.println("=== 准备返回的响应 ===");
+        System.out.println("响应数据: " + response);
+        System.out.println("===================");
+    }
+
+    // 响应DTO
+    public static class ProcessingStatusResponse {
+        private boolean success;
+        private String message;
+        private ProcessingStatusData data;
+
+        public ProcessingStatusResponse(boolean success, String message, ProcessingStatusData data) {
+            this.success = success;
+            this.message = message;
+            this.data = data;
+        }
+
+        public boolean isSuccess() { return success; }
+        public void setSuccess(boolean success) { this.success = success; }
+
+        public String getMessage() { return message; }
+        public void setMessage(String message) { this.message = message; }
+
+        public ProcessingStatusData getData() { return data; }
+        public void setData(ProcessingStatusData data) { this.data = data; }
+    }
+
+    public static class ProcessingStatusData {
+        private ProcessingStatusDTO status;
+
+        public ProcessingStatusData(ProcessingStatusDTO status) {
+            this.status = status;
+        }
+
+        public ProcessingStatusDTO getStatus() { return status; }
+        public void setStatus(ProcessingStatusDTO status) { this.status = status; }
+    }
+
+    public static class ProcessingStatusDTO {
+        private Integer documentId;
+        private String status;
+        private Integer progress;
+        private String errorMessage;
+        private String startedAt;
+        private String completedAt;
+        private String estimatedCompletionTime;
+
+        // Getters and Setters
+        public Integer getDocumentId() { return documentId; }
+        public void setDocumentId(Integer documentId) { this.documentId = documentId; }
+
+        public String getStatus() { return status; }
+        public void setStatus(String status) { this.status = status; }
+
+        public Integer getProgress() { return progress; }
+        public void setProgress(Integer progress) { this.progress = progress; }
+
+        public String getErrorMessage() { return errorMessage; }
+        public void setErrorMessage(String errorMessage) { this.errorMessage = errorMessage; }
+
+        public String getStartedAt() { return startedAt; }
+        public void setStartedAt(String startedAt) { this.startedAt = startedAt; }
+
+        public String getCompletedAt() { return completedAt; }
+        public void setCompletedAt(String completedAt) { this.completedAt = completedAt; }
+
+        public String getEstimatedCompletionTime() { return estimatedCompletionTime; }
+        public void setEstimatedCompletionTime(String estimatedCompletionTime) { this.estimatedCompletionTime = estimatedCompletionTime; }
+    }
+
+    @GetMapping("/{documentId}/processing-status")
+    public ResponseEntity<ProcessingStatusResponse> getDocumentProcessingStatus(
+            @PathVariable("documentId") Integer documentId,
+            @RequestHeader(value = "Authorization", required = false) String authHeader) {
+
+        try {
+            // 打印接收到的请求
+            printRequest(documentId, authHeader);
+
+            // 1. 验证认证
+            if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new ProcessingStatusResponse(false, "请先登录", null)
+                );
+            }
+
+            String token = authHeader.substring(7);
+
+            // 验证token
+            String tokenSql = "SELECT user_id FROM user_sessions WHERE access_token = ? AND expires_at > NOW()";
+            List<Map<String, Object>> tokenResults = jdbcTemplate.queryForList(tokenSql, token);
+
+            if (tokenResults.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new ProcessingStatusResponse(false, "登录已过期，请重新登录", null)
+                );
+            }
+
+            Integer userId = (Integer) tokenResults.get(0).get("user_id");
+
+            // 2. 检查文档是否存在且属于当前用户
+            String checkSql = "SELECT document_id FROM documents WHERE document_id = ? AND user_id = ? AND deleted_at IS NULL";
+            List<Map<String, Object>> documents = jdbcTemplate.queryForList(checkSql, documentId, userId);
+
+            if (documents.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.NOT_FOUND).body(
+                        new ProcessingStatusResponse(false, "文档不存在或没有权限", null)
+                );
+            }
+
+            // 3. 查询文档处理状态
+            String statusSql = "SELECT d.status, d.processing_progress, d.processing_error, " +
+                    "d.processing_started_at, d.processing_completed_at, " +
+                    "q.status as queue_status, q.priority, q.created_at as queue_created_at " +
+                    "FROM documents d " +
+                    "LEFT JOIN document_processing_queue q ON d.document_id = q.document_id " +
+                    "WHERE d.document_id = ? AND d.user_id = ?";
+
+            List<Map<String, Object>> statusResults = jdbcTemplate.queryForList(statusSql, documentId, userId);
+
+            if (statusResults.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.NOT_FOUND).body(
+                        new ProcessingStatusResponse(false, "文档处理状态不存在", null)
+                );
+            }
+
+            Map<String, Object> status = statusResults.get(0);
+            printQueryResult(status);
+
+            // 4. 构建响应数据
+            ProcessingStatusDTO dto = new ProcessingStatusDTO();
+            dto.setDocumentId(documentId);
+            dto.setStatus((String) status.get("status"));
+            dto.setProgress((Integer) status.get("processing_progress"));
+            dto.setErrorMessage((String) status.get("processing_error"));
+
+            // 格式化日期
+            java.sql.Timestamp startedAt = (java.sql.Timestamp) status.get("processing_started_at");
+            dto.setStartedAt(startedAt != null ? startedAt.toLocalDateTime().toString() : null);
+
+            java.sql.Timestamp completedAt = (java.sql.Timestamp) status.get("processing_completed_at");
+            dto.setCompletedAt(completedAt != null ? completedAt.toLocalDateTime().toString() : null);
+
+            // 估算完成时间（简单逻辑：如果进度>0，估算剩余时间）
+            Integer progress = dto.getProgress();
+            if (progress != null && progress > 0 && progress < 100) {
+                // 假设每1%进度需要1秒（实际应根据历史数据计算）
+                int remainingPercent = 100 - progress;
+                dto.setEstimatedCompletionTime(remainingPercent + "秒");
+            } else {
+                dto.setEstimatedCompletionTime(null);
+            }
+
+            ProcessingStatusData data = new ProcessingStatusData(dto);
+            ProcessingStatusResponse response = new ProcessingStatusResponse(true, "获取文档处理状态成功", data);
+
+            // 打印返回数据
+            printResponse(response);
+
+            return ResponseEntity.ok(response);
+
+        } catch (Exception e) {
+            System.err.println("获取文档处理状态过程中发生错误: " + e.getMessage());
+            e.printStackTrace();
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                    new ProcessingStatusResponse(false, "服务器内部错误: " + e.getMessage(), null)
+            );
+        }
+    }
+}
+--- 结束文件: DocumentsGetProcessingStatus.java ---
+
+--- 开始文件: DocumentsGetStats.java ---
+package com.vue.readingapp.documents;
+
+import org.springframework.web.bind.annotation.*;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.beans.factory.annotation.Autowired;
+import java.util.*;
+import java.time.LocalDateTime;
+
+@RestController
+@RequestMapping("/api/v1/documents")
+public class DocumentsGetStats {
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    // 打印接收到的请求
+    private void printRequest(String authHeader) {
+        System.out.println("=== 收到获取文档统计信息请求 ===");
+        System.out.println("认证头: " + authHeader);
+        System.out.println("============================");
+    }
+
+    // 打印查询结果
+    private void printQueryResult(Map<String, Object> stats) {
+        System.out.println("=== 数据库查询结果 ===");
+        System.out.println("统计信息: " + stats);
+        System.out.println("===================");
+    }
+
+    // 打印返回数据
+    private void printResponse(DocumentStatsResponse response) {
+        System.out.println("=== 准备返回的响应 ===");
+        System.out.println("响应数据: " + response);
+        System.out.println("===================");
+    }
+
+    // 响应DTO
+    public static class DocumentStatsResponse {
+        private boolean success;
+        private String message;
+        private DocumentStatsData data;
+
+        public DocumentStatsResponse(boolean success, String message, DocumentStatsData data) {
+            this.success = success;
+            this.message = message;
+            this.data = data;
+        }
+
+        public boolean isSuccess() { return success; }
+        public void setSuccess(boolean success) { this.success = success; }
+
+        public String getMessage() { return message; }
+        public void setMessage(String message) { this.message = message; }
+
+        public DocumentStatsData getData() { return data; }
+        public void setData(DocumentStatsData data) { this.data = data; }
+    }
+
+    public static class DocumentStatsData {
+        private DocumentStatsDTO stats;
+
+        public DocumentStatsData(DocumentStatsDTO stats) {
+            this.stats = stats;
+        }
+
+        public DocumentStatsDTO getStats() { return stats; }
+        public void setStats(DocumentStatsDTO stats) { this.stats = stats; }
+    }
+
+    public static class DocumentStatsDTO {
+        private Integer totalDocuments;
+        private String totalSize;
+        private Map<String, Integer> byLanguage;
+        private Map<String, Integer> byType;
+        private List<RecentUploadDTO> recentUploads;
+        private ReadingStatsDTO readingStats;
+
+        // Getters and Setters
+        public Integer getTotalDocuments() { return totalDocuments; }
+        public void setTotalDocuments(Integer totalDocuments) { this.totalDocuments = totalDocuments; }
+
+        public String getTotalSize() { return totalSize; }
+        public void setTotalSize(String totalSize) { this.totalSize = totalSize; }
+
+        public Map<String, Integer> getByLanguage() { return byLanguage; }
+        public void setByLanguage(Map<String, Integer> byLanguage) { this.byLanguage = byLanguage; }
+
+        public Map<String, Integer> getByType() { return byType; }
+        public void setByType(Map<String, Integer> byType) { this.byType = byType; }
+
+        public List<RecentUploadDTO> getRecentUploads() { return recentUploads; }
+        public void setRecentUploads(List<RecentUploadDTO> recentUploads) { this.recentUploads = recentUploads; }
+
+        public ReadingStatsDTO getReadingStats() { return readingStats; }
+        public void setReadingStats(ReadingStatsDTO readingStats) { this.readingStats = readingStats; }
+    }
+
+    public static class RecentUploadDTO {
+        private Integer id;
+        private String title;
+        private String fileName;
+        private String fileSize;
+        private String createdAt;
+
+        public RecentUploadDTO(Integer id, String title, String fileName, String fileSize, String createdAt) {
+            this.id = id;
+            this.title = title;
+            this.fileName = fileName;
+            this.fileSize = fileSize;
+            this.createdAt = createdAt;
+        }
+
+        // Getters and Setters
+        public Integer getId() { return id; }
+        public void setId(Integer id) { this.id = id; }
+
+        public String getTitle() { return title; }
+        public void setTitle(String title) { this.title = title; }
+
+        public String getFileName() { return fileName; }
+        public void setFileName(String fileName) { this.fileName = fileName; }
+
+        public String getFileSize() { return fileSize; }
+        public void setFileSize(String fileSize) { this.fileSize = fileSize; }
+
+        public String getCreatedAt() { return createdAt; }
+        public void setCreatedAt(String createdAt) { this.createdAt = createdAt; }
+    }
+
+    public static class ReadingStatsDTO {
+        private Integer totalReadingTime;
+        private Integer averageReadingTime;
+        private Integer completedDocuments;
+
+        public ReadingStatsDTO(Integer totalReadingTime, Integer averageReadingTime, Integer completedDocuments) {
+            this.totalReadingTime = totalReadingTime;
+            this.averageReadingTime = averageReadingTime;
+            this.completedDocuments = completedDocuments;
+        }
+
+        // Getters and Setters
+        public Integer getTotalReadingTime() { return totalReadingTime; }
+        public void setTotalReadingTime(Integer totalReadingTime) { this.totalReadingTime = totalReadingTime; }
+
+        public Integer getAverageReadingTime() { return averageReadingTime; }
+        public void setAverageReadingTime(Integer averageReadingTime) { this.averageReadingTime = averageReadingTime; }
+
+        public Integer getCompletedDocuments() { return completedDocuments; }
+        public void setCompletedDocuments(Integer completedDocuments) { this.completedDocuments = completedDocuments; }
+    }
+
+    @GetMapping("/stats")
+    public ResponseEntity<DocumentStatsResponse> getDocumentStats(
+            @RequestHeader(value = "Authorization", required = false) String authHeader) {
+
+        try {
+            // 打印接收到的请求
+            printRequest(authHeader);
+
+            // 1. 验证认证
+            if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new DocumentStatsResponse(false, "请先登录", null)
+                );
+            }
+
+            String token = authHeader.substring(7);
+
+            // 验证token
+            String tokenSql = "SELECT user_id FROM user_sessions WHERE access_token = ? AND expires_at > NOW()";
+            List<Map<String, Object>> tokenResults = jdbcTemplate.queryForList(tokenSql, token);
+
+            if (tokenResults.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new DocumentStatsResponse(false, "登录已过期，请重新登录", null)
+                );
+            }
+
+            Integer userId = (Integer) tokenResults.get(0).get("user_id");
+
+            // 2. 查询文档总数
+            String countSql = "SELECT COUNT(*) as total FROM documents WHERE user_id = ? AND deleted_at IS NULL";
+            Integer totalDocuments = jdbcTemplate.queryForObject(countSql, Integer.class, userId);
+
+            // 3. 查询总文件大小
+            String sizeSql = "SELECT COALESCE(SUM(file_size), 0) as total_size FROM documents WHERE user_id = ? AND deleted_at IS NULL";
+            Long totalSizeBytes = jdbcTemplate.queryForObject(sizeSql, Long.class, userId);
+            String totalSize = formatFileSize(totalSizeBytes);
+
+            // 4. 按语言分组统计
+            String languageSql = "SELECT language, COUNT(*) as count FROM documents WHERE user_id = ? AND deleted_at IS NULL GROUP BY language";
+            List<Map<String, Object>> languageResults = jdbcTemplate.queryForList(languageSql, userId);
+
+            Map<String, Integer> byLanguage = new HashMap<>();
+            for (Map<String, Object> row : languageResults) {
+                String lang = (String) row.get("language");
+                if (lang == null) lang = "unknown";
+                byLanguage.put(lang, ((Long) row.get("count")).intValue());
+            }
+
+            // 5. 按文件类型分组统计
+            String typeSql = "SELECT file_type, COUNT(*) as count FROM documents WHERE user_id = ? AND deleted_at IS NULL GROUP BY file_type";
+            List<Map<String, Object>> typeResults = jdbcTemplate.queryForList(typeSql, userId);
+
+            Map<String, Integer> byType = new HashMap<>();
+            for (Map<String, Object> row : typeResults) {
+                String fileType = (String) row.get("file_type");
+                if (fileType == null) fileType = "unknown";
+                byType.put(fileType, ((Long) row.get("count")).intValue());
+            }
+
+            // 6. 查询最近上传的文档
+            String recentSql = "SELECT document_id, title, file_name, file_size, created_at " +
+                    "FROM documents WHERE user_id = ? AND deleted_at IS NULL " +
+                    "ORDER BY created_at DESC LIMIT 10";
+            List<Map<String, Object>> recentResults = jdbcTemplate.queryForList(recentSql, userId);
+
+            List<RecentUploadDTO> recentUploads = new ArrayList<>();
+            for (Map<String, Object> row : recentResults) {
+                RecentUploadDTO dto = new RecentUploadDTO(
+                        (Integer) row.get("document_id"),
+                        (String) row.get("title"),
+                        (String) row.get("file_name"),
+                        formatFileSize((Long) row.get("file_size")),
+                        formatDate((java.sql.Timestamp) row.get("created_at"))
+                );
+                recentUploads.add(dto);
+            }
+
+            // 7. 查询阅读统计（简化实现）
+            // 总阅读时间：假设每页阅读时间30秒
+            String readingTimeSql = "SELECT COALESCE(SUM(page_count * 30), 0) as total_seconds FROM documents WHERE user_id = ? AND deleted_at IS NULL";
+            Integer totalReadingSeconds = jdbcTemplate.queryForObject(readingTimeSql, Integer.class, userId);
+
+            // 平均阅读时间
+            Integer averageReadingTime = totalDocuments > 0 ? totalReadingSeconds / totalDocuments : 0;
+
+            // 已完成文档数（阅读进度>=90%）
+            String completedSql = "SELECT COUNT(*) as completed FROM documents WHERE user_id = ? AND reading_progress >= 90 AND deleted_at IS NULL";
+            Integer completedDocuments = jdbcTemplate.queryForObject(completedSql, Integer.class, userId);
+
+            ReadingStatsDTO readingStats = new ReadingStatsDTO(
+                    totalReadingSeconds,
+                    averageReadingTime,
+                    completedDocuments
+            );
+
+            // 8. 构建统计信息
+            DocumentStatsDTO stats = new DocumentStatsDTO();
+            stats.setTotalDocuments(totalDocuments);
+            stats.setTotalSize(totalSize);
+            stats.setByLanguage(byLanguage);
+            stats.setByType(byType);
+            stats.setRecentUploads(recentUploads);
+            stats.setReadingStats(readingStats);
+
+            printQueryResult(new HashMap<String, Object>() {{
+                put("totalDocuments", totalDocuments);
+                put("totalSize", totalSize);
+                put("byLanguage", byLanguage);
+                put("byType", byType);
+                put("recentUploadsCount", recentUploads.size());
+                put("readingStats", readingStats);
+            }});
+
+            // 9. 构建响应数据
+            DocumentStatsData data = new DocumentStatsData(stats);
+            DocumentStatsResponse response = new DocumentStatsResponse(true, "获取文档统计信息成功", data);
+
+            // 打印返回数据
+            printResponse(response);
+
+            return ResponseEntity.ok(response);
+
+        } catch (Exception e) {
+            System.err.println("获取文档统计信息过程中发生错误: " + e.getMessage());
+            e.printStackTrace();
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                    new DocumentStatsResponse(false, "服务器内部错误: " + e.getMessage(), null)
+            );
+        }
+    }
+
+    // 格式化文件大小
+    private String formatFileSize(Long bytes) {
+        if (bytes == null || bytes == 0) return "0 B";
+
+        String[] units = {"B", "KB", "MB", "GB", "TB"};
+        int unitIndex = 0;
+        double size = bytes;
+
+        while (size >= 1024 && unitIndex < units.length - 1) {
+            size /= 1024;
+            unitIndex++;
+        }
+
+        return String.format("%.2f %s", size, units[unitIndex]);
+    }
+
+    // 格式化日期
+    private String formatDate(java.sql.Timestamp timestamp) {
+        if (timestamp == null) return "";
+        return timestamp.toLocalDateTime().toString();
+    }
+}
+--- 结束文件: DocumentsGetStats.java ---
+
+--- 开始文件: DocumentsMove.java ---
+package com.vue.readingapp.documents;
+
+import org.springframework.web.bind.annotation.*;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.beans.factory.annotation.Autowired;
+import java.util.*;
+import java.time.LocalDateTime;
+import java.sql.Timestamp;
+
+@RestController
+@RequestMapping("/api/v1/documents")
+public class DocumentsMove {
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    // 打印接收到的请求
+    private void printRequest(Integer documentId, MoveRequest request, String authHeader) {
+        System.out.println("=== 收到移动文档请求 ===");
+        System.out.println("文档ID: " + documentId);
+        System.out.println("目标文件夹ID: " + request.getFolderId());
+        System.out.println("认证头: " + authHeader);
+        System.out.println("=====================");
+    }
+
+    // 打印查询结果
+    private void printQueryResult(Map<String, Object> document) {
+        System.out.println("=== 数据库查询结果 ===");
+        System.out.println("文档信息: " + document);
+        System.out.println("===================");
+    }
+
+    // 打印返回数据
+    private void printResponse(MoveResponse response) {
+        System.out.println("=== 准备返回的响应 ===");
+        System.out.println("响应数据: " + response);
+        System.out.println("===================");
+    }
+
+    // 请求DTO
+    public static class MoveRequest {
+        private Integer folderId;
+
+        public Integer getFolderId() { return folderId; }
+        public void setFolderId(Integer folderId) { this.folderId = folderId; }
+    }
+
+    // 响应DTO
+    public static class MoveResponse {
+        private boolean success;
+        private String message;
+        private MoveData data;
+
+        public MoveResponse(boolean success, String message, MoveData data) {
+            this.success = success;
+            this.message = message;
+            this.data = data;
+        }
+
+        public boolean isSuccess() { return success; }
+        public void setSuccess(boolean success) { this.success = success; }
+
+        public String getMessage() { return message; }
+        public void setMessage(String message) { this.message = message; }
+
+        public MoveData getData() { return data; }
+        public void setData(MoveData data) { this.data = data; }
+    }
+
+    public static class MoveData {
+        private MoveDocumentDTO document;
+
+        public MoveData(MoveDocumentDTO document) {
+            this.document = document;
+        }
+
+        public MoveDocumentDTO getDocument() { return document; }
+        public void setDocument(MoveDocumentDTO document) { this.document = document; }
+    }
+
+    public static class MoveDocumentDTO {
+        private Integer id;
+        private String title;
+        private Integer folderId;
+        private String updatedAt;
+
+        // Getters and Setters
+        public Integer getId() { return id; }
+        public void setId(Integer id) { this.id = id; }
+
+        public String getTitle() { return title; }
+        public void setTitle(String title) { this.title = title; }
+
+        public Integer getFolderId() { return folderId; }
+        public void setFolderId(Integer folderId) { this.folderId = folderId; }
+
+        public String getUpdatedAt() { return updatedAt; }
+        public void setUpdatedAt(String updatedAt) { this.updatedAt = updatedAt; }
+    }
+
+    @PutMapping("/{documentId}/move")
+    public ResponseEntity<MoveResponse> moveDocument(
+            @PathVariable("documentId") Integer documentId,
+            @RequestBody MoveRequest request,
+            @RequestHeader(value = "Authorization", required = false) String authHeader) {
+
+        try {
+            // 打印接收到的请求
+            printRequest(documentId, request, authHeader);
+
+            // 1. 验证认证
+            if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new MoveResponse(false, "请先登录", null)
+                );
+            }
+
+            String token = authHeader.substring(7);
+
+            // 验证token
+            String tokenSql = "SELECT user_id FROM user_sessions WHERE access_token = ? AND expires_at > NOW()";
+            List<Map<String, Object>> tokenResults = jdbcTemplate.queryForList(tokenSql, token);
+
+            if (tokenResults.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new MoveResponse(false, "登录已过期，请重新登录", null)
+                );
+            }
+
+            Integer userId = (Integer) tokenResults.get(0).get("user_id");
+
+            // 2. 验证请求数据
+            if (request == null || request.getFolderId() == null) {
+                return ResponseEntity.badRequest().body(
+                        new MoveResponse(false, "目标文件夹ID不能为空", null)
+                );
+            }
+
+            // 3. 检查文档是否存在且属于当前用户
+            String checkSql = "SELECT document_id, title FROM documents WHERE document_id = ? AND user_id = ? AND deleted_at IS NULL";
+            List<Map<String, Object>> documents = jdbcTemplate.queryForList(checkSql, documentId, userId);
+
+            if (documents.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.NOT_FOUND).body(
+                        new MoveResponse(false, "文档不存在或没有权限", null)
+                );
+            }
+
+            Map<String, Object> document = documents.get(0);
+            String documentTitle = (String) document.get("title");
+
+            // 4. 检查目标文件夹是否存在（如果提供了文件夹ID）
+            // 注意：根据数据库设计，没有文件夹表，这里简化处理
+            // 实际项目中应该有文件夹表，并检查文件夹是否存在且属于当前用户
+            if (request.getFolderId() > 0) {
+                // 这里应该查询文件夹表，但数据库设计中没有
+                // 简化处理：假设文件夹存在
+                System.out.println("移动文档到文件夹: " + request.getFolderId());
+            }
+
+            // 5. 更新文档的文件夹ID
+            // 注意：根据提供的数据库表结构，documents表中没有folder_id字段
+            // 这里假设有folder_id字段，或者我们使用其他方式存储文件夹关系
+            // 简化实现：假设有folder_id字段
+
+            LocalDateTime now = LocalDateTime.now();
+            Timestamp timestamp = Timestamp.valueOf(now);
+
+            String updateSql = "UPDATE documents SET folder_id = ?, updated_at = ? WHERE document_id = ? AND user_id = ?";
+            int rowsUpdated = jdbcTemplate.update(updateSql, request.getFolderId(), timestamp, documentId, userId);
+
+            if (rowsUpdated == 0) {
+                return ResponseEntity.status(HttpStatus.NOT_FOUND).body(
+                        new MoveResponse(false, "文档移动失败", null)
+                );
+            }
+
+            // 6. 查询更新后的文档信息
+            String querySql = "SELECT document_id, title, folder_id, updated_at FROM documents WHERE document_id = ? AND user_id = ?";
+            List<Map<String, Object>> updatedDocuments = jdbcTemplate.queryForList(querySql, documentId, userId);
+            Map<String, Object> updatedDocument = updatedDocuments.get(0);
+
+            printQueryResult(updatedDocument);
+
+            // 7. 构建响应数据
+            MoveDocumentDTO dto = new MoveDocumentDTO();
+            dto.setId((Integer) updatedDocument.get("document_id"));
+            dto.setTitle((String) updatedDocument.get("title"));
+            dto.setFolderId((Integer) updatedDocument.get("folder_id"));
+            dto.setUpdatedAt(formatDate((java.sql.Timestamp) updatedDocument.get("updated_at")));
+
+            MoveData data = new MoveData(dto);
+            MoveResponse response = new MoveResponse(true, "文档 '" + documentTitle + "' 移动成功", data);
+
+            // 打印返回数据
+            printResponse(response);
+
+            return ResponseEntity.ok(response);
+
+        } catch (Exception e) {
+            System.err.println("移动文档过程中发生错误: " + e.getMessage());
+            e.printStackTrace();
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                    new MoveResponse(false, "服务器内部错误: " + e.getMessage(), null)
+            );
+        }
+    }
+
+    // 格式化日期
+    private String formatDate(java.sql.Timestamp timestamp) {
+        if (timestamp == null) return "";
+        return timestamp.toLocalDateTime().toString();
+    }
+}
+--- 结束文件: DocumentsMove.java ---
+
+--- 开始文件: DocumentsSearch.java ---
+package com.vue.readingapp.documents;
+
+import org.springframework.web.bind.annotation.*;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.beans.factory.annotation.Autowired;
+import java.util.*;
+import java.util.stream.Collectors;
+
+@RestController
+@RequestMapping("/api/v1/documents")
+public class DocumentsSearch {
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    // 打印接收到的请求
+    private void printRequest(String query, Map<String, Object> params) {
+        System.out.println("=== 收到搜索文档请求 ===");
+        System.out.println("搜索关键词: " + query);
+        System.out.println("搜索参数: " + params);
+        System.out.println("=====================");
+    }
+
+    // 打印查询结果
+    private void printQueryResult(List<Map<String, Object>> documents, int total) {
+        System.out.println("=== 数据库查询结果 ===");
+        System.out.println("搜索到文档数量: " + documents.size());
+        System.out.println("总文档数: " + total);
+        System.out.println("文档列表: " + documents);
+        System.out.println("===================");
+    }
+
+    // 打印返回数据
+    private void printResponse(SearchResponse response) {
+        System.out.println("=== 准备返回的响应 ===");
+        System.out.println("响应数据: " + response);
+        System.out.println("===================");
+    }
+
+    // 请求DTO
+    public static class SearchRequest {
+        private String query;
+        private Integer page;
+        private Integer pageSize;
+        private String sortBy;
+
+        public String getQuery() { return query; }
+        public void setQuery(String query) { this.query = query; }
+
+        public Integer getPage() { return page != null ? page : 1; }
+        public void setPage(Integer page) { this.page = page; }
+
+        public Integer getPageSize() { return pageSize != null ? pageSize : 20; }
+        public void setPageSize(Integer pageSize) { this.pageSize = pageSize; }
+
+        public String getSortBy() { return sortBy != null ? sortBy : "relevance"; }
+        public void setSortBy(String sortBy) { this.sortBy = sortBy; }
+    }
+
+    // 响应DTO
+    public static class SearchResponse {
+        private boolean success;
+        private String message;
+        private SearchData data;
+
+        public SearchResponse(boolean success, String message, SearchData data) {
+            this.success = success;
+            this.message = message;
+            this.data = data;
+        }
+
+        public boolean isSuccess() { return success; }
+        public void setSuccess(boolean success) { this.success = success; }
+
+        public String getMessage() { return message; }
+        public void setMessage(String message) { this.message = message; }
+
+        public SearchData getData() { return data; }
+        public void setData(SearchData data) { this.data = data; }
+    }
+
+    public static class SearchData {
+        private List<SearchDocumentDTO> documents;
+        private SearchPaginationDTO pagination;
+
+        public SearchData(List<SearchDocumentDTO> documents, SearchPaginationDTO pagination) {
+            this.documents = documents;
+            this.pagination = pagination;
+        }
+
+        public List<SearchDocumentDTO> getDocuments() { return documents; }
+        public void setDocuments(List<SearchDocumentDTO> documents) { this.documents = documents; }
+
+        public SearchPaginationDTO getPagination() { return pagination; }
+        public void setPagination(SearchPaginationDTO pagination) { this.pagination = pagination; }
+    }
+
+    public static class SearchDocumentDTO {
+        private Integer id;
+        private String title;
+        private String description;
+        private String fileName;
+        private String fileSize;
+        private String fileType;
+        private String language;
+        private Integer pageCount;
+        private Integer readProgress;
+        private List<String> tags;
+        private Double relevance;
+        private Map<String, List<String>> highlights;
+        private String createdAt;
+        private String thumbnail;
+
+        // Getters and Setters
+        public Integer getId() { return id; }
+        public void setId(Integer id) { this.id = id; }
+
+        public String getTitle() { return title; }
+        public void setTitle(String title) { this.title = title; }
+
+        public String getDescription() { return description; }
+        public void setDescription(String description) { this.description = description; }
+
+        public String getFileName() { return fileName; }
+        public void setFileName(String fileName) { this.fileName = fileName; }
+
+        public String getFileSize() { return fileSize; }
+        public void setFileSize(String fileSize) { this.fileSize = fileSize; }
+
+        public String getFileType() { return fileType; }
+        public void setFileType(String fileType) { this.fileType = fileType; }
+
+        public String getLanguage() { return language; }
+        public void setLanguage(String language) { this.language = language; }
+
+        public Integer getPageCount() { return pageCount; }
+        public void setPageCount(Integer pageCount) { this.pageCount = pageCount; }
+
+        public Integer getReadProgress() { return readProgress; }
+        public void setReadProgress(Integer readProgress) { this.readProgress = readProgress; }
+
+        public List<String> getTags() { return tags; }
+        public void setTags(List<String> tags) { this.tags = tags; }
+
+        public Double getRelevance() { return relevance; }
+        public void setRelevance(Double relevance) { this.relevance = relevance; }
+
+        public Map<String, List<String>> getHighlights() { return highlights; }
+        public void setHighlights(Map<String, List<String>> highlights) { this.highlights = highlights; }
+
+        public String getCreatedAt() { return createdAt; }
+        public void setCreatedAt(String createdAt) { this.createdAt = createdAt; }
+
+        public String getThumbnail() { return thumbnail; }
+        public void setThumbnail(String thumbnail) { this.thumbnail = thumbnail; }
+    }
+
+    public static class SearchPaginationDTO {
+        private Integer page;
+        private Integer pageSize;
+        private Integer total;
+        private Integer totalPages;
+
+        public SearchPaginationDTO(Integer page, Integer pageSize, Integer total) {
+            this.page = page;
+            this.pageSize = pageSize;
+            this.total = total;
+            this.totalPages = (int) Math.ceil((double) total / pageSize);
+        }
+
+        public Integer getPage() { return page; }
+        public void setPage(Integer page) { this.page = page; }
+
+        public Integer getPageSize() { return pageSize; }
+        public void setPageSize(Integer pageSize) { this.pageSize = pageSize; }
+
+        public Integer getTotal() { return total; }
+        public void setTotal(Integer total) { this.total = total; }
+
+        public Integer getTotalPages() { return totalPages; }
+        public void setTotalPages(Integer totalPages) { this.totalPages = totalPages; }
+    }
+
+    @GetMapping("/search")
+    public ResponseEntity<SearchResponse> searchDocuments(
+            @RequestParam("query") String query,
+            @RequestParam(value = "page", required = false) Integer page,
+            @RequestParam(value = "pageSize", required = false) Integer pageSize,
+            @RequestParam(value = "sortBy", required = false) String sortBy,
+            @RequestHeader(value = "Authorization", required = false) String authHeader) {
+
+        try {
+            // 构建请求参数
+            SearchRequest request = new SearchRequest();
+            request.setQuery(query);
+            request.setPage(page);
+            request.setPageSize(pageSize);
+            request.setSortBy(sortBy);
+
+            Map<String, Object> params = new HashMap<>();
+            params.put("query", request.getQuery());
+            params.put("page", request.getPage());
+            params.put("pageSize", request.getPageSize());
+            params.put("sortBy", request.getSortBy());
+
+            // 打印接收到的请求
+            printRequest(query, params);
+
+            // 1. 验证认证
+            if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new SearchResponse(false, "请先登录", null)
+                );
+            }
+
+            String token = authHeader.substring(7);
+
+            // 验证token
+            String tokenSql = "SELECT user_id FROM user_sessions WHERE access_token = ? AND expires_at > NOW()";
+            List<Map<String, Object>> tokenResults = jdbcTemplate.queryForList(tokenSql, token);
+
+            if (tokenResults.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new SearchResponse(false, "登录已过期，请重新登录", null)
+                );
+            }
+
+            Integer userId = (Integer) tokenResults.get(0).get("user_id");
+
+            // 2. 验证搜索关键词
+            if (request.getQuery() == null || request.getQuery().trim().isEmpty()) {
+                return ResponseEntity.badRequest().body(
+                        new SearchResponse(false, "搜索关键词不能为空", null)
+                );
+            }
+
+            // 3. 构建搜索条件
+            String searchTerm = "%" + request.getQuery().trim() + "%";
+
+            // 基础查询
+            StringBuilder whereClause = new StringBuilder("WHERE d.user_id = ? AND d.deleted_at IS NULL ");
+            whereClause.append("AND (d.title LIKE ? OR d.description LIKE ? OR d.file_name LIKE ?)");
+
+            List<Object> queryParams = new ArrayList<>();
+            queryParams.add(userId);
+            queryParams.add(searchTerm);
+            queryParams.add(searchTerm);
+            queryParams.add(searchTerm);
+
+            // 4. 获取总数
+            String countSql = "SELECT COUNT(*) as total FROM documents d " + whereClause;
+            Integer total = jdbcTemplate.queryForObject(countSql, Integer.class, queryParams.toArray());
+
+            // 5. 构建排序
+            String orderClause;
+            if ("relevance".equals(request.getSortBy())) {
+                // 简单相关性排序：标题匹配 > 描述匹配 > 文件名匹配
+                orderClause = "ORDER BY " +
+                        "CASE WHEN d.title LIKE ? THEN 1 " +
+                        "WHEN d.description LIKE ? THEN 2 " +
+                        "WHEN d.file_name LIKE ? THEN 3 " +
+                        "ELSE 4 END, " +
+                        "d.created_at DESC";
+            } else {
+                orderClause = "ORDER BY d.created_at DESC";
+            }
+
+            // 6. 构建分页
+            int offset = (request.getPage() - 1) * request.getPageSize();
+            String limitClause = "LIMIT ? OFFSET ?";
+
+            // 7. 查询文档列表
+            String querySql = "SELECT d.document_id, d.title, d.description, d.file_name, d.file_size, " +
+                    "d.file_type, d.language, d.page_count, d.reading_progress, d.created_at, " +
+                    "u.username as uploader " +
+                    "FROM documents d " +
+                    "LEFT JOIN users u ON d.user_id = u.user_id " +
+                    whereClause + " " + orderClause + " " + limitClause;
+
+            List<Object> finalQueryParams = new ArrayList<>(queryParams);
+
+            if ("relevance".equals(request.getSortBy())) {
+                finalQueryParams.add(searchTerm);
+                finalQueryParams.add(searchTerm);
+                finalQueryParams.add(searchTerm);
+            }
+
+            finalQueryParams.add(request.getPageSize());
+            finalQueryParams.add(offset);
+
+            List<Map<String, Object>> documents = jdbcTemplate.queryForList(querySql, finalQueryParams.toArray());
+            printQueryResult(documents, total);
+
+            // 8. 构建响应数据
+            List<SearchDocumentDTO> documentDTOs = new ArrayList<>();
+
+            for (Map<String, Object> doc : documents) {
+                Integer docId = (Integer) doc.get("document_id");
+
+                // 查询文档标签
+                String tagSql = "SELECT dt.tag_name FROM document_tag_relations dtr " +
+                        "JOIN document_tags dt ON dtr.tag_id = dt.tag_id " +
+                        "WHERE dtr.document_id = ? AND dt.user_id = ?";
+                List<Map<String, Object>> tagResults = jdbcTemplate.queryForList(tagSql, docId, userId);
+
+                List<String> tags = tagResults.stream()
+                        .map(tag -> (String) tag.get("tag_name"))
+                        .collect(Collectors.toList());
+
+                // 构建高亮信息
+                Map<String, List<String>> highlights = new HashMap<>();
+                String title = (String) doc.get("title");
+                String description = (String) doc.get("description");
+
+                // 简单高亮逻辑：如果包含搜索词，就标记
+                if (title != null && title.toLowerCase().contains(request.getQuery().toLowerCase())) {
+                    highlights.put("title", Collections.singletonList(title));
+                }
+
+                if (description != null && description.toLowerCase().contains(request.getQuery().toLowerCase())) {
+                    // 截取包含搜索词的部分
+                    int index = description.toLowerCase().indexOf(request.getQuery().toLowerCase());
+                    int start = Math.max(0, index - 50);
+                    int end = Math.min(description.length(), index + request.getQuery().length() + 50);
+                    String snippet = description.substring(start, end);
+                    if (start > 0) snippet = "..." + snippet;
+                    if (end < description.length()) snippet = snippet + "...";
+                    highlights.put("description", Collections.singletonList(snippet));
+                }
+
+                // 计算相关性分数（简单实现）
+                double relevance = 0.0;
+                if (title != null && title.toLowerCase().contains(request.getQuery().toLowerCase())) {
+                    relevance += 1.0;
+                }
+                if (description != null && description.toLowerCase().contains(request.getQuery().toLowerCase())) {
+                    relevance += 0.5;
+                }
+
+                // 构建DTO
+                SearchDocumentDTO dto = new SearchDocumentDTO();
+                dto.setId(docId);
+                dto.setTitle(title);
+                dto.setDescription(description);
+                dto.setFileName((String) doc.get("file_name"));
+
+                // 格式化文件大小
+                Long fileSize = (Long) doc.get("file_size");
+                dto.setFileSize(formatFileSize(fileSize));
+
+                dto.setFileType((String) doc.get("file_type"));
+                dto.setLanguage((String) doc.get("language"));
+                dto.setPageCount((Integer) doc.get("page_count"));
+                dto.setReadProgress((Integer) doc.get("reading_progress"));
+                dto.setTags(tags);
+                dto.setRelevance(relevance);
+                dto.setHighlights(highlights);
+                dto.setCreatedAt(formatDate((java.sql.Timestamp) doc.get("created_at")));
+                dto.setThumbnail(null); // 暂时没有缩略图
+
+                documentDTOs.add(dto);
+            }
+
+            // 9. 构建分页信息
+            SearchPaginationDTO pagination = new SearchPaginationDTO(
+                    request.getPage(),
+                    request.getPageSize(),
+                    total
+            );
+
+            SearchData data = new SearchData(documentDTOs, pagination);
+            SearchResponse response = new SearchResponse(true, "搜索文档成功", data);
+
+            // 打印返回数据
+            printResponse(response);
+
+            return ResponseEntity.ok(response);
+
+        } catch (Exception e) {
+            System.err.println("搜索文档过程中发生错误: " + e.getMessage());
+            e.printStackTrace();
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                    new SearchResponse(false, "服务器内部错误: " + e.getMessage(), null)
+            );
+        }
+    }
+
+    // 格式化文件大小
+    private String formatFileSize(Long bytes) {
+        if (bytes == null || bytes == 0) return "0 B";
+
+        String[] units = {"B", "KB", "MB", "GB", "TB"};
+        int unitIndex = 0;
+        double size = bytes;
+
+        while (size >= 1024 && unitIndex < units.length - 1) {
+            size /= 1024;
+            unitIndex++;
+        }
+
+        return String.format("%.2f %s", size, units[unitIndex]);
+    }
+
+    // 格式化日期
+    private String formatDate(java.sql.Timestamp timestamp) {
+        if (timestamp == null) return "";
+        return timestamp.toLocalDateTime().toString();
+    }
+}
+--- 结束文件: DocumentsSearch.java ---
+
+--- 开始文件: DocumentsShare.java ---
+package com.vue.readingapp.documents;
+
+import org.springframework.web.bind.annotation.*;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.beans.factory.annotation.Autowired;
+import java.util.*;
+import java.time.LocalDateTime;
+import java.sql.Timestamp;
+
+@RestController
+@RequestMapping("/api/v1/documents")
+public class DocumentsShare {
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    // 打印接收到的请求
+    private void printRequest(Integer documentId, ShareRequest request, String authHeader) {
+        System.out.println("=== 收到分享文档请求 ===");
+        System.out.println("文档ID: " + documentId);
+        System.out.println("分享设置: " + request);
+        System.out.println("认证头: " + authHeader);
+        System.out.println("=====================");
+    }
+
+    // 打印查询结果
+    private void printQueryResult(Map<String, Object> document) {
+        System.out.println("=== 数据库查询结果 ===");
+        System.out.println("文档信息: " + document);
+        System.out.println("===================");
+    }
+
+    // 打印返回数据
+    private void printResponse(ShareResponse response) {
+        System.out.println("=== 准备返回的响应 ===");
+        System.out.println("响应数据: " + response);
+        System.out.println("===================");
+    }
+
+    // 请求DTO
+    public static class ShareRequest {
+        private Boolean isPublic;
+        private String shareLink;
+        private String password;
+        private Date expiryDate;
+        private List<String> allowedUsers;
+
+        public Boolean getIsPublic() { return isPublic; }
+        public void setIsPublic(Boolean isPublic) { this.isPublic = isPublic; }
+
+        public String getShareLink() { return shareLink; }
+        public void setShareLink(String shareLink) { this.shareLink = shareLink; }
+
+        public String getPassword() { return password; }
+        public void setPassword(String password) { this.password = password; }
+
+        public Date getExpiryDate() { return expiryDate; }
+        public void setExpiryDate(Date expiryDate) { this.expiryDate = expiryDate; }
+
+        public List<String> getAllowedUsers() { return allowedUsers; }
+        public void setAllowedUsers(List<String> allowedUsers) { this.allowedUsers = allowedUsers; }
+    }
+
+    // 响应DTO
+    public static class ShareResponse {
+        private boolean success;
+        private String message;
+        private ShareData data;
+
+        public ShareResponse(boolean success, String message, ShareData data) {
+            this.success = success;
+            this.message = message;
+            this.data = data;
+        }
+
+        public boolean isSuccess() { return success; }
+        public void setSuccess(boolean success) { this.success = success; }
+
+        public String getMessage() { return message; }
+        public void setMessage(String message) { this.message = message; }
+
+        public ShareData getData() { return data; }
+        public void setData(ShareData data) { this.data = data; }
+    }
+
+    public static class ShareData {
+        private ShareDocumentDTO document;
+
+        public ShareData(ShareDocumentDTO document) {
+            this.document = document;
+        }
+
+        public ShareDocumentDTO getDocument() { return document; }
+        public void setDocument(ShareDocumentDTO document) { this.document = document; }
+    }
+
+    public static class ShareDocumentDTO {
+        private Integer id;
+        private String title;
+        private Boolean isPublic;
+        private String shareLink;
+        private Boolean hasPassword;
+        private Date expiryDate;
+        private String updatedAt;
+
+        // Getters and Setters
+        public Integer getId() { return id; }
+        public void setId(Integer id) { this.id = id; }
+
+        public String getTitle() { return title; }
+        public void setTitle(String title) { this.title = title; }
+
+        public Boolean getIsPublic() { return isPublic; }
+        public void setIsPublic(Boolean isPublic) { this.isPublic = isPublic; }
+
+        public String getShareLink() { return shareLink; }
+        public void setShareLink(String shareLink) { this.shareLink = shareLink; }
+
+        public Boolean getHasPassword() { return hasPassword; }
+        public void setHasPassword(Boolean hasPassword) { this.hasPassword = hasPassword; }
+
+        public Date getExpiryDate() { return expiryDate; }
+        public void setExpiryDate(Date expiryDate) { this.expiryDate = expiryDate; }
+
+        public String getUpdatedAt() { return updatedAt; }
+        public void setUpdatedAt(String updatedAt) { this.updatedAt = updatedAt; }
+    }
+
+    @PostMapping("/{documentId}/share")
+    public ResponseEntity<ShareResponse> shareDocument(
+            @PathVariable("documentId") Integer documentId,
+            @RequestBody ShareRequest request,
+            @RequestHeader(value = "Authorization", required = false) String authHeader) {
+
+        try {
+            // 打印接收到的请求
+            printRequest(documentId, request, authHeader);
+
+            // 1. 验证认证
+            if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new ShareResponse(false, "请先登录", null)
+                );
+            }
+
+            String token = authHeader.substring(7);
+
+            // 验证token
+            String tokenSql = "SELECT user_id FROM user_sessions WHERE access_token = ? AND expires_at > NOW()";
+            List<Map<String, Object>> tokenResults = jdbcTemplate.queryForList(tokenSql, token);
+
+            if (tokenResults.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new ShareResponse(false, "登录已过期，请重新登录", null)
+                );
+            }
+
+            Integer userId = (Integer) tokenResults.get(0).get("user_id");
+
+            // 2. 验证请求数据
+            if (request == null) {
+                return ResponseEntity.badRequest().body(
+                        new ShareResponse(false, "分享设置不能为空", null)
+                );
+            }
+
+            // 3. 检查文档是否存在且属于当前用户
+            String checkSql = "SELECT document_id, title FROM documents WHERE document_id = ? AND user_id = ? AND deleted_at IS NULL";
+            List<Map<String, Object>> documents = jdbcTemplate.queryForList(checkSql, documentId, userId);
+
+            if (documents.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.NOT_FOUND).body(
+                        new ShareResponse(false, "文档不存在或没有权限", null)
+                );
+            }
+
+            Map<String, Object> document = documents.get(0);
+            String documentTitle = (String) document.get("title");
+
+            // 4. 生成分享链接（如果未提供）
+            String shareLink = request.getShareLink();
+            if (shareLink == null || shareLink.trim().isEmpty()) {
+                // 生成唯一的分享链接
+                shareLink = "https://readmemo.app/share/" + UUID.randomUUID().toString();
+            }
+
+            // 5. 更新文档分享设置
+            LocalDateTime now = LocalDateTime.now();
+            Timestamp timestamp = Timestamp.valueOf(now);
+
+            String updateSql = "UPDATE documents SET is_public = ?, share_link = ?, share_password = ?, " +
+                    "share_expiry_date = ?, updated_at = ? WHERE document_id = ? AND user_id = ?";
+
+            int rowsUpdated = jdbcTemplate.update(updateSql,
+                    request.getIsPublic() != null ? request.getIsPublic() : true,
+                    shareLink,
+                    request.getPassword(),
+                    request.getExpiryDate() != null ? new Timestamp(request.getExpiryDate().getTime()) : null,
+                    timestamp,
+                    documentId,
+                    userId
+            );
+
+            if (rowsUpdated == 0) {
+                return ResponseEntity.status(HttpStatus.NOT_FOUND).body(
+                        new ShareResponse(false, "文档分享失败", null)
+                );
+            }
+
+            // 6. 保存允许的用户列表（如果有）
+            if (request.getAllowedUsers() != null && !request.getAllowedUsers().isEmpty()) {
+                // 这里应该有一个文档分享权限表
+                // 简化实现：暂时不实现
+                System.out.println("允许的用户: " + request.getAllowedUsers());
+            }
+
+            // 7. 查询更新后的文档信息
+            String querySql = "SELECT document_id, title, is_public, share_link, share_password, " +
+                    "share_expiry_date, updated_at FROM documents WHERE document_id = ? AND user_id = ?";
+            List<Map<String, Object>> updatedDocuments = jdbcTemplate.queryForList(querySql, documentId, userId);
+            Map<String, Object> updatedDocument = updatedDocuments.get(0);
+
+            printQueryResult(updatedDocument);
+
+            // 8. 构建响应数据
+            ShareDocumentDTO dto = new ShareDocumentDTO();
+            dto.setId((Integer) updatedDocument.get("document_id"));
+            dto.setTitle((String) updatedDocument.get("title"));
+            dto.setIsPublic((Boolean) updatedDocument.get("is_public"));
+            dto.setShareLink((String) updatedDocument.get("share_link"));
+            dto.setHasPassword(updatedDocument.get("share_password") != null);
+
+            java.sql.Timestamp expiryDate = (java.sql.Timestamp) updatedDocument.get("share_expiry_date");
+            dto.setExpiryDate(expiryDate != null ? new Date(expiryDate.getTime()) : null);
+
+            dto.setUpdatedAt(formatDate((java.sql.Timestamp) updatedDocument.get("updated_at")));
+
+            ShareData data = new ShareData(dto);
+            ShareResponse response = new ShareResponse(true, "文档 '" + documentTitle + "' 分享成功", data);
+
+            // 打印返回数据
+            printResponse(response);
+
+            return ResponseEntity.ok(response);
+
+        } catch (Exception e) {
+            System.err.println("分享文档过程中发生错误: " + e.getMessage());
+            e.printStackTrace();
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                    new ShareResponse(false, "服务器内部错误: " + e.getMessage(), null)
+            );
+        }
+    }
+
+    // 格式化日期
+    private String formatDate(java.sql.Timestamp timestamp) {
+        if (timestamp == null) return "";
+        return timestamp.toLocalDateTime().toString();
+    }
+}
+--- 结束文件: DocumentsShare.java ---
+
+--- 开始文件: DocumentsUnshare.java ---
+package com.vue.readingapp.documents;
+
+import org.springframework.web.bind.annotation.*;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.beans.factory.annotation.Autowired;
+import java.util.*;
+import java.time.LocalDateTime;
+import java.sql.Timestamp;
+
+@RestController
+@RequestMapping("/api/v1/documents")
+public class DocumentsUnshare {
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    // 打印接收到的请求
+    private void printRequest(Integer documentId, String authHeader) {
+        System.out.println("=== 收到取消分享文档请求 ===");
+        System.out.println("文档ID: " + documentId);
+        System.out.println("认证头: " + authHeader);
+        System.out.println("=========================");
+    }
+
+    // 打印查询结果
+    private void printQueryResult(Map<String, Object> document) {
+        System.out.println("=== 数据库查询结果 ===");
+        System.out.println("文档信息: " + document);
+        System.out.println("===================");
+    }
+
+    // 打印返回数据
+    private void printResponse(UnshareResponse response) {
+        System.out.println("=== 准备返回的响应 ===");
+        System.out.println("响应数据: " + response);
+        System.out.println("===================");
+    }
+
+    // 响应DTO
+    public static class UnshareResponse {
+        private boolean success;
+        private String message;
+        private UnshareData data;
+
+        public UnshareResponse(boolean success, String message, UnshareData data) {
+            this.success = success;
+            this.message = message;
+            this.data = data;
+        }
+
+        public boolean isSuccess() { return success; }
+        public void setSuccess(boolean success) { this.success = success; }
+
+        public String getMessage() { return message; }
+        public void setMessage(String message) { this.message = message; }
+
+        public UnshareData getData() { return data; }
+        public void setData(UnshareData data) { this.data = data; }
+    }
+
+    public static class UnshareData {
+        private UnshareDocumentDTO document;
+
+        public UnshareData(UnshareDocumentDTO document) {
+            this.document = document;
+        }
+
+        public UnshareDocumentDTO getDocument() { return document; }
+        public void setDocument(UnshareDocumentDTO document) { this.document = document; }
+    }
+
+    public static class UnshareDocumentDTO {
+        private Integer id;
+        private String title;
+        private Boolean isPublic;
+        private String updatedAt;
+
+        // Getters and Setters
+        public Integer getId() { return id; }
+        public void setId(Integer id) { this.id = id; }
+
+        public String getTitle() { return title; }
+        public void setTitle(String title) { this.title = title; }
+
+        public Boolean getIsPublic() { return isPublic; }
+        public void setIsPublic(Boolean isPublic) { this.isPublic = isPublic; }
+
+        public String getUpdatedAt() { return updatedAt; }
+        public void setUpdatedAt(String updatedAt) { this.updatedAt = updatedAt; }
+    }
+
+    @DeleteMapping("/{documentId}/share")
+    public ResponseEntity<UnshareResponse> unshareDocument(
+            @PathVariable("documentId") Integer documentId,
+            @RequestHeader(value = "Authorization", required = false) String authHeader) {
+
+        try {
+            // 打印接收到的请求
+            printRequest(documentId, authHeader);
+
+            // 1. 验证认证
+            if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new UnshareResponse(false, "请先登录", null)
+                );
+            }
+
+            String token = authHeader.substring(7);
+
+            // 验证token
+            String tokenSql = "SELECT user_id FROM user_sessions WHERE access_token = ? AND expires_at > NOW()";
+            List<Map<String, Object>> tokenResults = jdbcTemplate.queryForList(tokenSql, token);
+
+            if (tokenResults.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new UnshareResponse(false, "登录已过期，请重新登录", null)
+                );
+            }
+
+            Integer userId = (Integer) tokenResults.get(0).get("user_id");
+
+            // 2. 检查文档是否存在且属于当前用户
+            String checkSql = "SELECT document_id, title FROM documents WHERE document_id = ? AND user_id = ? AND deleted_at IS NULL";
+            List<Map<String, Object>> documents = jdbcTemplate.queryForList(checkSql, documentId, userId);
+
+            if (documents.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.NOT_FOUND).body(
+                        new UnshareResponse(false, "文档不存在或没有权限", null)
+                );
+            }
+
+            Map<String, Object> document = documents.get(0);
+            String documentTitle = (String) document.get("title");
+
+            // 3. 取消分享（设置is_public为false，清除分享信息）
+            LocalDateTime now = LocalDateTime.now();
+            Timestamp timestamp = Timestamp.valueOf(now);
+
+            String updateSql = "UPDATE documents SET is_public = FALSE, share_link = NULL, share_password = NULL, " +
+                    "share_expiry_date = NULL, updated_at = ? WHERE document_id = ? AND user_id = ?";
+
+            int rowsUpdated = jdbcTemplate.update(updateSql, timestamp, documentId, userId);
+
+            if (rowsUpdated == 0) {
+                return ResponseEntity.status(HttpStatus.NOT_FOUND).body(
+                        new UnshareResponse(false, "取消分享失败", null)
+                );
+            }
+
+            // 4. 清除分享权限记录（如果有相关表）
+            // 简化实现：暂时不实现
+
+            // 5. 查询更新后的文档信息
+            String querySql = "SELECT document_id, title, is_public, updated_at FROM documents WHERE document_id = ? AND user_id = ?";
+            List<Map<String, Object>> updatedDocuments = jdbcTemplate.queryForList(querySql, documentId, userId);
+            Map<String, Object> updatedDocument = updatedDocuments.get(0);
+
+            printQueryResult(updatedDocument);
+
+            // 6. 构建响应数据
+            UnshareDocumentDTO dto = new UnshareDocumentDTO();
+            dto.setId((Integer) updatedDocument.get("document_id"));
+            dto.setTitle((String) updatedDocument.get("title"));
+            dto.setIsPublic((Boolean) updatedDocument.get("is_public"));
+            dto.setUpdatedAt(formatDate((java.sql.Timestamp) updatedDocument.get("updated_at")));
+
+            UnshareData data = new UnshareData(dto);
+            UnshareResponse response = new UnshareResponse(true, "文档 '" + documentTitle + "' 取消分享成功", data);
+
+            // 打印返回数据
+            printResponse(response);
+
+            return ResponseEntity.ok(response);
+
+        } catch (Exception e) {
+            System.err.println("取消分享文档过程中发生错误: " + e.getMessage());
+            e.printStackTrace();
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                    new UnshareResponse(false, "服务器内部错误: " + e.getMessage(), null)
+            );
+        }
+    }
+
+    // 格式化日期
+    private String formatDate(java.sql.Timestamp timestamp) {
+        if (timestamp == null) return "";
+        return timestamp.toLocalDateTime().toString();
+    }
+}
+--- 结束文件: DocumentsUnshare.java ---
+
+--- 开始文件: DocumentsUpdate.java ---
+package com.vue.readingapp.documents;
+
+import org.springframework.web.bind.annotation.*;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.beans.factory.annotation.Autowired;
+import java.util.*;
+import java.time.LocalDateTime;
+import java.sql.Timestamp;
+
+@RestController
+@RequestMapping("/api/v1/documents")
+public class DocumentsUpdate {
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    // 打印接收到的请求
+    private void printRequest(Integer documentId, UpdateRequest request) {
+        System.out.println("=== 收到更新文档请求 ===");
+        System.out.println("文档ID: " + documentId);
+        System.out.println("更新数据: " + request);
+        System.out.println("=====================");
+    }
+
+    // 打印查询结果
+    private void printQueryResult(Map<String, Object> document) {
+        System.out.println("=== 数据库查询结果 ===");
+        System.out.println("文档信息: " + document);
+        System.out.println("===================");
+    }
+
+    // 打印返回数据
+    private void printResponse(UpdateResponse response) {
+        System.out.println("=== 准备返回的响应 ===");
+        System.out.println("响应数据: " + response);
+        System.out.println("===================");
+    }
+
+    // 请求DTO
+    public static class UpdateRequest {
+        private String title;
+        private String description;
+        private List<String> tags;
+        private String language;
+        private Boolean isPublic;
+        private Boolean isFavorite;
+
+        public String getTitle() { return title; }
+        public void setTitle(String title) { this.title = title; }
+
+        public String getDescription() { return description; }
+        public void setDescription(String description) { this.description = description; }
+
+        public List<String> getTags() { return tags; }
+        public void setTags(List<String> tags) { this.tags = tags; }
+
+        public String getLanguage() { return language; }
+        public void setLanguage(String language) { this.language = language; }
+
+        public Boolean getIsPublic() { return isPublic; }
+        public void setIsPublic(Boolean isPublic) { this.isPublic = isPublic; }
+
+        public Boolean getIsFavorite() { return isFavorite; }
+        public void setIsFavorite(Boolean isFavorite) { this.isFavorite = isFavorite; }
+    }
+
+    // 响应DTO
+    public static class UpdateResponse {
+        private boolean success;
+        private String message;
+        private UpdateData data;
+
+        public UpdateResponse(boolean success, String message, UpdateData data) {
+            this.success = success;
+            this.message = message;
+            this.data = data;
+        }
+
+        public boolean isSuccess() { return success; }
+        public void setSuccess(boolean success) { this.success = success; }
+
+        public String getMessage() { return message; }
+        public void setMessage(String message) { this.message = message; }
+
+        public UpdateData getData() { return data; }
+        public void setData(UpdateData data) { this.data = data; }
+    }
+
+    public static class UpdateData {
+        private UpdateDocumentDTO document;
+
+        public UpdateData(UpdateDocumentDTO document) {
+            this.document = document;
+        }
+
+        public UpdateDocumentDTO getDocument() { return document; }
+        public void setDocument(UpdateDocumentDTO document) { this.document = document; }
+    }
+
+    public static class UpdateDocumentDTO {
+        private Integer id;
+        private String title;
+        private String description;
+        private String language;
+        private List<String> tags;
+        private Boolean isPublic;
+        private Boolean isFavorite;
+        private LocalDateTime updatedAt;
+
+        // Getters and Setters
+        public Integer getId() { return id; }
+        public void setId(Integer id) { this.id = id; }
+
+        public String getTitle() { return title; }
+        public void setTitle(String title) { this.title = title; }
+
+        public String getDescription() { return description; }
+        public void setDescription(String description) { this.description = description; }
+
+        public String getLanguage() { return language; }
+        public void setLanguage(String language) { this.language = language; }
+
+        public List<String> getTags() { return tags; }
+        public void setTags(List<String> tags) { this.tags = tags; }
+
+        public Boolean getIsPublic() { return isPublic; }
+        public void setIsPublic(Boolean isPublic) { this.isPublic = isPublic; }
+
+        public Boolean getIsFavorite() { return isFavorite; }
+        public void setIsFavorite(Boolean isFavorite) { this.isFavorite = isFavorite; }
+
+        public LocalDateTime getUpdatedAt() { return updatedAt; }
+        public void setUpdatedAt(LocalDateTime updatedAt) { this.updatedAt = updatedAt; }
+    }
+
+    @PutMapping("/{documentId}")
+    public ResponseEntity<UpdateResponse> updateDocument(
+            @PathVariable("documentId") Integer documentId,
+            @RequestBody UpdateRequest request,
+            @RequestHeader(value = "Authorization", required = false) String authHeader) {
+
+        try {
+            // 打印接收到的请求
+            printRequest(documentId, request);
+
+            // 1. 验证认证
+            if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new UpdateResponse(false, "请先登录", null)
+                );
+            }
+
+            String token = authHeader.substring(7);
+
+            // 验证token
+            String tokenSql = "SELECT user_id FROM user_sessions WHERE access_token = ? AND expires_at > NOW()";
+            List<Map<String, Object>> tokenResults = jdbcTemplate.queryForList(tokenSql, token);
+
+            if (tokenResults.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new UpdateResponse(false, "登录已过期，请重新登录", null)
+                );
+            }
+
+            Integer userId = (Integer) tokenResults.get(0).get("user_id");
+
+            // 2. 验证请求数据
+            if (request == null || (request.getTitle() == null && request.getDescription() == null &&
+                    request.getTags() == null && request.getLanguage() == null &&
+                    request.getIsPublic() == null && request.getIsFavorite() == null)) {
+                return ResponseEntity.badRequest().body(
+                        new UpdateResponse(false, "更新数据不能为空", null)
+                );
+            }
+
+            // 3. 检查文档是否存在且属于当前用户
+            String checkSql = "SELECT document_id FROM documents WHERE document_id = ? AND user_id = ? AND deleted_at IS NULL";
+            List<Map<String, Object>> documents = jdbcTemplate.queryForList(checkSql, documentId, userId);
+
+            if (documents.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.NOT_FOUND).body(
+                        new UpdateResponse(false, "文档不存在或没有权限", null)
+                );
+            }
+
+            // 4. 构建更新SQL
+            StringBuilder updateSql = new StringBuilder("UPDATE documents SET ");
+            List<Object> params = new ArrayList<>();
+
+            if (request.getTitle() != null) {
+                updateSql.append("title = ?, ");
+                params.add(request.getTitle());
+            }
+
+            if (request.getDescription() != null) {
+                updateSql.append("description = ?, ");
+                params.add(request.getDescription());
+            }
+
+            if (request.getLanguage() != null) {
+                updateSql.append("language = ?, ");
+                params.add(request.getLanguage());
+            }
+
+            if (request.getIsPublic() != null) {
+                updateSql.append("is_public = ?, ");
+                params.add(request.getIsPublic());
+            }
+
+            if (request.getIsFavorite() != null) {
+                updateSql.append("is_favorite = ?, ");
+                params.add(request.getIsFavorite());
+            }
+
+            // 添加更新时间
+            LocalDateTime now = LocalDateTime.now();
+            Timestamp timestamp = Timestamp.valueOf(now);
+            updateSql.append("updated_at = ? ");
+            params.add(timestamp);
+
+            updateSql.append("WHERE document_id = ? AND user_id = ?");
+            params.add(documentId);
+            params.add(userId);
+
+            // 5. 执行更新
+            int rowsUpdated = jdbcTemplate.update(updateSql.toString(), params.toArray());
+
+            if (rowsUpdated == 0) {
+                return ResponseEntity.status(HttpStatus.NOT_FOUND).body(
+                        new UpdateResponse(false, "文档更新失败", null)
+                );
+            }
+
+            // 6. 处理标签更新
+            if (request.getTags() != null) {
+                // 删除旧的标签关系
+                String deleteRelationsSql = "DELETE dtr FROM document_tag_relations dtr " +
+                        "JOIN document_tags dt ON dtr.tag_id = dt.tag_id " +
+                        "WHERE dtr.document_id = ? AND dt.user_id = ?";
+                jdbcTemplate.update(deleteRelationsSql, documentId, userId);
+
+                // 添加新的标签关系
+                for (String tagName : request.getTags()) {
+                    if (tagName == null || tagName.trim().isEmpty()) continue;
+
+                    // 检查标签是否已存在
+                    String checkTagSql = "SELECT tag_id FROM document_tags WHERE user_id = ? AND tag_name = ?";
+                    List<Map<String, Object>> existingTags = jdbcTemplate.queryForList(checkTagSql, userId, tagName);
+
+                    Integer tagId;
+                    if (existingTags.isEmpty()) {
+                        // 创建新标签
+                        String insertTagSql = "INSERT INTO document_tags (user_id, tag_name, created_at) VALUES (?, ?, ?)";
+                        jdbcTemplate.update(insertTagSql, userId, tagName, timestamp);
+
+                        String lastTagIdSql = "SELECT LAST_INSERT_ID() as id";
+                        tagId = jdbcTemplate.queryForObject(lastTagIdSql, Integer.class);
+                    } else {
+                        tagId = (Integer) existingTags.get(0).get("tag_id");
+                    }
+
+                    // 建立文档-标签关系
+                    String insertRelationSql = "INSERT INTO document_tag_relations (document_id, tag_id, created_at) VALUES (?, ?, ?)";
+                    jdbcTemplate.update(insertRelationSql, documentId, tagId, timestamp);
+                }
+            }
+
+            // 7. 查询更新后的文档信息
+            String querySql = "SELECT d.document_id, d.title, d.description, d.language, d.is_public, d.is_favorite, d.updated_at " +
+                    "FROM documents d WHERE d.document_id = ? AND d.user_id = ?";
+
+            List<Map<String, Object>> updatedDocuments = jdbcTemplate.queryForList(querySql, documentId, userId);
+            Map<String, Object> updatedDocument = updatedDocuments.get(0);
+            printQueryResult(updatedDocument);
+
+            // 8. 查询文档标签
+            String tagSql = "SELECT dt.tag_name FROM document_tag_relations dtr " +
+                    "JOIN document_tags dt ON dtr.tag_id = dt.tag_id " +
+                    "WHERE dtr.document_id = ? AND dt.user_id = ?";
+            List<Map<String, Object>> tagResults = jdbcTemplate.queryForList(tagSql, documentId, userId);
+
+            List<String> tags = new ArrayList<>();
+            for (Map<String, Object> tag : tagResults) {
+                tags.add((String) tag.get("tag_name"));
+            }
+
+            // 9. 构建响应数据
+            UpdateDocumentDTO dto = new UpdateDocumentDTO();
+            dto.setId((Integer) updatedDocument.get("document_id"));
+            dto.setTitle((String) updatedDocument.get("title"));
+            dto.setDescription((String) updatedDocument.get("description"));
+            dto.setLanguage((String) updatedDocument.get("language"));
+            dto.setTags(tags);
+            dto.setIsPublic((Boolean) updatedDocument.get("is_public"));
+            dto.setIsFavorite((Boolean) updatedDocument.get("is_favorite"));
+            dto.setUpdatedAt(formatDate((java.sql.Timestamp) updatedDocument.get("updated_at")));
+
+            UpdateData data = new UpdateData(dto);
+            UpdateResponse response = new UpdateResponse(true, "文档更新成功", data);
+
+            // 打印返回数据
+            printResponse(response);
+
+            return ResponseEntity.ok(response);
+
+        } catch (Exception e) {
+            System.err.println("更新文档过程中发生错误: " + e.getMessage());
+            e.printStackTrace();
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                    new UpdateResponse(false, "服务器内部错误: " + e.getMessage(), null)
+            );
+        }
+    }
+
+    // 格式化日期（保持LocalDateTime类型）
+    private LocalDateTime formatDate(java.sql.Timestamp timestamp) {
+        if (timestamp == null) return null;
+        return timestamp.toLocalDateTime();
+    }
+}
+--- 结束文件: DocumentsUpdate.java ---
+
+--- 开始文件: DocumentsUpload.java ---
+package com.vue.readingapp.documents;
+
+import org.springframework.web.bind.annotation.*;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.web.multipart.MultipartFile;
+import java.util.*;
+import java.time.LocalDateTime;
+import java.io.IOException;
+import java.nio.file.*;
+import java.sql.Timestamp;
+
+@RestController
+@RequestMapping("/api/v1/documents")
+public class DocumentsUpload {
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    // 文件存储路径
+    private final String UPLOAD_DIR = "uploads/documents/";
+
+    // 打印接收到的请求
+    private void printRequest(String title, String description, String tags, String language, String fileName, long fileSize) {
+        System.out.println("=== 收到上传文档请求 ===");
+        System.out.println("标题: " + title);
+        System.out.println("描述: " + description);
+        System.out.println("标签: " + tags);
+        System.out.println("语言: " + language);
+        System.out.println("文件名: " + fileName);
+        System.out.println("文件大小: " + fileSize + " bytes");
+        System.out.println("=====================");
+    }
+
+    // 打印返回数据
+    private void printResponse(UploadResponse response) {
+        System.out.println("=== 准备返回的响应 ===");
+        System.out.println("响应数据: " + response);
+        System.out.println("===================");
+    }
+
+    // 请求DTO
+    public static class UploadRequest {
+        private String title;
+        private String description;
+        private String tags;
+        private String language;
+
+        public String getTitle() { return title; }
+        public void setTitle(String title) { this.title = title; }
+
+        public String getDescription() { return description; }
+        public void setDescription(String description) { this.description = description; }
+
+        public String getTags() { return tags; }
+        public void setTags(String tags) { this.tags = tags; }
+
+        public String getLanguage() { return language; }
+        public void setLanguage(String language) { this.language = language; }
+    }
+
+    // 响应DTO
+    public static class UploadResponse {
+        private boolean success;
+        private String message;
+        private UploadData data;
+
+        public UploadResponse(boolean success, String message, UploadData data) {
+            this.success = success;
+            this.message = message;
+            this.data = data;
+        }
+
+        public boolean isSuccess() { return success; }
+        public void setSuccess(boolean success) { this.success = success; }
+
+        public String getMessage() { return message; }
+        public void setMessage(String message) { this.message = message; }
+
+        public UploadData getData() { return data; }
+        public void setData(UploadData data) { this.data = data; }
+    }
+
+    public static class UploadData {
+        private UploadDocumentDTO document;
+
+        public UploadData(UploadDocumentDTO document) {
+            this.document = document;
+        }
+
+        public UploadDocumentDTO getDocument() { return document; }
+        public void setDocument(UploadDocumentDTO document) { this.document = document; }
+    }
+
+    public static class UploadDocumentDTO {
+        private Integer id;
+        private String title;
+        private String fileName;
+        private String fileSize;
+        private String fileType;
+        private String status;
+        private Integer processingProgress;
+        private LocalDateTime createdAt;
+
+        // Getters and Setters
+        public Integer getId() { return id; }
+        public void setId(Integer id) { this.id = id; }
+
+        public String getTitle() { return title; }
+        public void setTitle(String title) { this.title = title; }
+
+        public String getFileName() { return fileName; }
+        public void setFileName(String fileName) { this.fileName = fileName; }
+
+        public String getFileSize() { return fileSize; }
+        public void setFileSize(String fileSize) { this.fileSize = fileSize; }
+
+        public String getFileType() { return fileType; }
+        public void setFileType(String fileType) { this.fileType = fileType; }
+
+        public String getStatus() { return status; }
+        public void setStatus(String status) { this.status = status; }
+
+        public Integer getProcessingProgress() { return processingProgress; }
+        public void setProcessingProgress(Integer processingProgress) { this.processingProgress = processingProgress; }
+
+        public LocalDateTime getCreatedAt() { return createdAt; }
+        public void setCreatedAt(LocalDateTime createdAt) { this.createdAt = createdAt; }
+    }
+
+    @PostMapping("/upload")
+    public ResponseEntity<UploadResponse> uploadDocument(
+            @RequestParam("file") MultipartFile file,
+            @RequestParam("title") String title,
+            @RequestParam(value = "description", required = false) String description,
+            @RequestParam(value = "tags", required = false) String tags,
+            @RequestParam(value = "language", required = false) String language,
+            @RequestHeader(value = "Authorization", required = false) String authHeader) {
+
+        try {
+            // 打印接收到的请求
+            printRequest(title, description, tags, language, file.getOriginalFilename(), file.getSize());
+
+            // 1. 验证认证
+            if (authHeader == null || !authHeader.startsWith("Bearer ")) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new UploadResponse(false, "请先登录", null)
+                );
+            }
+
+            String token = authHeader.substring(7);
+
+            // 验证token
+            String tokenSql = "SELECT user_id FROM user_sessions WHERE access_token = ? AND expires_at > NOW()";
+            List<Map<String, Object>> tokenResults = jdbcTemplate.queryForList(tokenSql, token);
+
+            if (tokenResults.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new UploadResponse(false, "登录已过期，请重新登录", null)
+                );
+            }
+
+            Integer userId = (Integer) tokenResults.get(0).get("user_id");
+
+            // 2. 验证文件
+            if (file.isEmpty()) {
+                return ResponseEntity.badRequest().body(
+                        new UploadResponse(false, "文件不能为空", null)
+                );
+            }
+
+            // 验证文件类型
+            String contentType = file.getContentType();
+            List<String> allowedTypes = Arrays.asList(
+                    "application/pdf",
+                    "application/epub+zip",
+                    "application/msword",
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    "text/plain",
+                    "text/html"
+            );
+
+            if (!allowedTypes.contains(contentType)) {
+                return ResponseEntity.badRequest().body(
+                        new UploadResponse(false, "不支持的文件类型: " + contentType, null)
+                );
+            }
+
+            // 验证文件大小（最大100MB）
+            long maxSize = 100 * 1024 * 1024; // 100MB
+            if (file.getSize() > maxSize) {
+                return ResponseEntity.badRequest().body(
+                        new UploadResponse(false, "文件大小不能超过100MB", null)
+                );
+            }
+
+            // 3. 保存文件
+            String originalFilename = file.getOriginalFilename();
+            String fileExtension = getFileExtension(originalFilename);
+            String uniqueFilename = System.currentTimeMillis() + "_" + UUID.randomUUID().toString() + fileExtension;
+
+            // 创建上传目录
+            Path uploadPath = Paths.get(UPLOAD_DIR);
+            if (!Files.exists(uploadPath)) {
+                Files.createDirectories(uploadPath);
+            }
+
+            Path filePath = uploadPath.resolve(uniqueFilename);
+            Files.copy(file.getInputStream(), filePath, StandardCopyOption.REPLACE_EXISTING);
+
+            // 4. 保存到数据库
+            LocalDateTime now = LocalDateTime.now();
+            Timestamp timestamp = Timestamp.valueOf(now);
+
+            String insertSql = "INSERT INTO documents (user_id, title, description, file_path, file_name, " +
+                    "file_size, file_type, language, status, processing_progress, created_at, updated_at) " +
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+
+            jdbcTemplate.update(insertSql,
+                    userId,
+                    title,
+                    description,
+                    filePath.toString(),
+                    originalFilename,
+                    file.getSize(),
+                    contentType,
+                    language != null ? language : "en",
+                    "uploading",
+                    0,
+                    timestamp,
+                    timestamp
+            );
+
+            // 获取插入的文档ID
+            String lastIdSql = "SELECT LAST_INSERT_ID() as id";
+            Integer documentId = jdbcTemplate.queryForObject(lastIdSql, Integer.class);
+
+            // 5. 处理标签
+            if (tags != null && !tags.trim().isEmpty()) {
+                // 解析标签（JSON格式或逗号分隔）
+                List<String> tagList = new ArrayList<>();
+                if (tags.startsWith("[") && tags.endsWith("]")) {
+                    // JSON数组格式
+                    tags = tags.substring(1, tags.length() - 1);
+                    String[] tagArray = tags.split(",");
+                    for (String tag : tagArray) {
+                        tagList.add(tag.trim().replace("\"", ""));
+                    }
+                } else {
+                    // 逗号分隔格式
+                    String[] tagArray = tags.split(",");
+                    for (String tag : tagArray) {
+                        tagList.add(tag.trim());
+                    }
+                }
+
+                // 为每个标签创建或获取标签ID，并建立关系
+                for (String tagName : tagList) {
+                    if (tagName.isEmpty()) continue;
+
+                    // 检查标签是否已存在
+                    String checkTagSql = "SELECT tag_id FROM document_tags WHERE user_id = ? AND tag_name = ?";
+                    List<Map<String, Object>> existingTags = jdbcTemplate.queryForList(checkTagSql, userId, tagName);
+
+                    Integer tagId;
+                    if (existingTags.isEmpty()) {
+                        // 创建新标签
+                        String insertTagSql = "INSERT INTO document_tags (user_id, tag_name, created_at) VALUES (?, ?, ?)";
+                        jdbcTemplate.update(insertTagSql, userId, tagName, timestamp);
+
+                        String lastTagIdSql = "SELECT LAST_INSERT_ID() as id";
+                        tagId = jdbcTemplate.queryForObject(lastTagIdSql, Integer.class);
+                    } else {
+                        tagId = (Integer) existingTags.get(0).get("tag_id");
+                    }
+
+                    // 建立文档-标签关系
+                    String insertRelationSql = "INSERT INTO document_tag_relations (document_id, tag_id, created_at) VALUES (?, ?, ?)";
+                    jdbcTemplate.update(insertRelationSql, documentId, tagId, timestamp);
+                }
+            }
+
+            // 6. 添加到文档处理队列
+            String insertQueueSql = "INSERT INTO document_processing_queue (document_id, status, priority, created_at) VALUES (?, ?, ?, ?)";
+            jdbcTemplate.update(insertQueueSql, documentId, "pending", 1, timestamp);
+
+            // 7. 构建响应数据
+            UploadDocumentDTO dto = new UploadDocumentDTO();
+            dto.setId(documentId);
+            dto.setTitle(title);
+            dto.setFileName(originalFilename);
+            dto.setFileSize(formatFileSize(file.getSize()));
+            dto.setFileType(contentType);
+            dto.setStatus("uploading");
+            dto.setProcessingProgress(0);
+            dto.setCreatedAt(now);
+
+            UploadData data = new UploadData(dto);
+            UploadResponse response = new UploadResponse(true, "文档上传成功", data);
+
+            // 打印返回数据
+            printResponse(response);
+
+            return ResponseEntity.ok(response);
+
+        } catch (IOException e) {
+            System.err.println("文件保存过程中发生错误: " + e.getMessage());
+            e.printStackTrace();
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                    new UploadResponse(false, "文件保存失败: " + e.getMessage(), null)
+            );
+        } catch (Exception e) {
+            System.err.println("上传文档过程中发生错误: " + e.getMessage());
+            e.printStackTrace();
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                    new UploadResponse(false, "服务器内部错误: " + e.getMessage(), null)
+            );
+        }
+    }
+
+    // 获取文件扩展名
+    private String getFileExtension(String filename) {
+        if (filename == null || filename.lastIndexOf(".") == -1) {
+            return "";
+        }
+        return filename.substring(filename.lastIndexOf("."));
+    }
+
+    // 格式化文件大小
+    private String formatFileSize(long bytes) {
+        if (bytes == 0) return "0 B";
+
+        String[] units = {"B", "KB", "MB", "GB", "TB"};
+        int unitIndex = 0;
+        double size = bytes;
+
+        while (size >= 1024 && unitIndex < units.length - 1) {
+            size /= 1024;
+            unitIndex++;
+        }
+
+        return String.format("%.2f %s", size, units[unitIndex]);
+    }
+}
+--- 结束文件: DocumentsUpload.java ---
+

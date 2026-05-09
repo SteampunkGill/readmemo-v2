@@ -1,0 +1,248 @@
+package com.vue.readingapp.feedback;
+
+import org.springframework.web.bind.annotation.*;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.RowMapper;
+import org.springframework.beans.factory.annotation.Autowired;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.time.LocalDateTime;
+import java.util.UUID;
+import java.util.Map;
+import java.util.HashMap;
+import java.util.List;
+import java.util.ArrayList;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.core.type.TypeReference;
+
+@RestController
+@RequestMapping("/api/v1/feedback")
+public class FeedbackUpdateCategory {
+
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    private ObjectMapper objectMapper = new ObjectMapper();
+
+    // 打印接收到的请求
+    private void printRequest(Object request) {
+        System.out.println("=== 收到更新反馈分类请求 ===");
+        System.out.println("请求数据: " + request);
+        System.out.println("=======================");
+    }
+
+    // 打印查询结果
+    private void printQueryResult(Object result) {
+        System.out.println("=== 数据库查询结果 ===");
+        System.out.println("查询结果: " + result);
+        System.out.println("===================");
+    }
+
+    // 打印返回数据
+    private void printResponse(Object response) {
+        System.out.println("=== 准备返回的响应 ===");
+        System.out.println("响应数据: " + response);
+        System.out.println("===================");
+    }
+
+    // 请求DTO
+    public static class UpdateCategoryRequest {
+        private String categoryId;
+        private String name;
+        private String description;
+
+        public String getCategoryId() { return categoryId; }
+        public void setCategoryId(String categoryId) { this.categoryId = categoryId; }
+
+        public String getName() { return name; }
+        public void setName(String name) { this.name = name; }
+
+        public String getDescription() { return description; }
+        public void setDescription(String description) { this.description = description; }
+    }
+
+    // 响应DTO
+    public static class UpdateCategoryResponse {
+        private boolean success;
+        private String message;
+        private CategoryData data;
+
+        public UpdateCategoryResponse(boolean success, String message, CategoryData data) {
+            this.success = success;
+            this.message = message;
+            this.data = data;
+        }
+
+        public boolean isSuccess() { return success; }
+        public void setSuccess(boolean success) { this.success = success; }
+
+        public String getMessage() { return message; }
+        public void setMessage(String message) { this.message = message; }
+
+        public CategoryData getData() { return data; }
+        public void setData(CategoryData data) { this.data = data; }
+    }
+
+    public static class CategoryData {
+        private String id;
+        private String name;
+        private String value;
+        private String description;
+        private String icon;
+        private String color;
+        private String updatedAt;
+
+        public CategoryData(String id, String name, String value, String description,
+                            String icon, String color, String updatedAt) {
+            this.id = id;
+            this.name = name;
+            this.value = value;
+            this.description = description;
+            this.icon = icon;
+            this.color = color;
+            this.updatedAt = updatedAt;
+        }
+
+        public String getId() { return id; }
+        public void setId(String id) { this.id = id; }
+
+        public String getName() { return name; }
+        public void setName(String name) { this.name = name; }
+
+        public String getValue() { return value; }
+        public void setValue(String value) { this.value = value; }
+
+        public String getDescription() { return description; }
+        public void setDescription(String description) { this.description = description; }
+
+        public String getIcon() { return icon; }
+        public void setIcon(String icon) { this.icon = icon; }
+
+        public String getColor() { return color; }
+        public void setColor(String color) { this.color = color; }
+
+        public String getUpdatedAt() { return updatedAt; }
+        public void setUpdatedAt(String updatedAt) { this.updatedAt = updatedAt; }
+    }
+
+    @PutMapping("/categories/{categoryId}")
+    public ResponseEntity<UpdateCategoryResponse> updateFeedbackCategory(
+            @PathVariable String categoryId,
+            @RequestBody UpdateCategoryRequest request,
+            @RequestHeader(value = "X-User-Id", required = false) String userId) {
+
+        // 设置categoryId
+        request.setCategoryId(categoryId);
+
+        // 打印接收到的请求
+        printRequest(request);
+
+        try {
+            // 1. 验证参数
+            if (categoryId == null || categoryId.trim().isEmpty()) {
+                return ResponseEntity.badRequest().body(
+                        new UpdateCategoryResponse(false, "分类ID不能为空", null)
+                );
+            }
+
+            // 2. 验证用户身份（需要管理员权限）
+            if (userId == null || userId.trim().isEmpty()) {
+                return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(
+                        new UpdateCategoryResponse(false, "用户未登录", null)
+                );
+            }
+
+            // 检查是否是管理员
+            String adminCheckSql = "SELECT role FROM users WHERE user_id = ?";
+            List<Map<String, Object>> userList = jdbcTemplate.queryForList(adminCheckSql, userId);
+
+            boolean isAdmin = false;
+            if (!userList.isEmpty()) {
+                Map<String, Object> user = userList.get(0);
+                String role = (String) user.get("role");
+                isAdmin = "admin".equals(role) || "moderator".equals(role);
+            }
+
+            if (!isAdmin) {
+                return ResponseEntity.status(HttpStatus.FORBIDDEN).body(
+                        new UpdateCategoryResponse(false, "需要管理员权限", null)
+                );
+            }
+
+            // 3. 检查分类是否存在
+            String checkSql = "SELECT * FROM feedback_categories WHERE category_id = ?";
+            List<Map<String, Object>> categoryList = jdbcTemplate.queryForList(checkSql, categoryId);
+
+            if (categoryList.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.NOT_FOUND).body(
+                        new UpdateCategoryResponse(false, "未找到指定的分类", null)
+                );
+            }
+
+            Map<String, Object> existingCategory = categoryList.get(0);
+
+            // 4. 构建更新字段
+            String updateName = request.getName() != null ? request.getName() : (String) existingCategory.get("name");
+            String updateDescription = request.getDescription() != null ? request.getDescription() : (String) existingCategory.get("description");
+
+            // 5. 更新分类记录
+            String updateSql = "UPDATE feedback_categories SET name = ?, description = ?, updated_at = NOW() WHERE category_id = ?";
+
+            int rowsAffected = jdbcTemplate.update(updateSql,
+                    updateName,
+                    updateDescription,
+                    categoryId
+            );
+
+            printQueryResult("更新行数: " + rowsAffected);
+
+            if (rowsAffected == 0) {
+                return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                        new UpdateCategoryResponse(false, "更新分类失败", null)
+                );
+            }
+
+            // 6. 查询更新后的分类
+            String selectSql = "SELECT * FROM feedback_categories WHERE category_id = ?";
+            List<Map<String, Object>> updatedCategoryList = jdbcTemplate.queryForList(selectSql, categoryId);
+            printQueryResult("更新后的分类详情: " + updatedCategoryList);
+
+            if (updatedCategoryList.isEmpty()) {
+                return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                        new UpdateCategoryResponse(false, "无法获取更新的分类信息", null)
+                );
+            }
+
+            Map<String, Object> updatedCategory = updatedCategoryList.get(0);
+
+            // 7. 准备响应数据
+            CategoryData categoryData = new CategoryData(
+                    categoryId,
+                    updateName,
+                    (String) updatedCategory.get("value"),
+                    updateDescription,
+                    (String) updatedCategory.get("icon"),
+                    (String) updatedCategory.get("color"),
+                    updatedCategory.get("updated_at").toString()
+            );
+
+            UpdateCategoryResponse response = new UpdateCategoryResponse(
+                    true, "更新反馈分类成功", categoryData
+            );
+
+            // 打印返回数据
+            printResponse(response);
+
+            return ResponseEntity.ok(response);
+
+        } catch (Exception e) {
+            System.err.println("更新反馈分类过程中发生错误: " + e.getMessage());
+            e.printStackTrace();
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(
+                    new UpdateCategoryResponse(false, "服务器内部错误: " + e.getMessage(), null)
+            );
+        }
+    }
+}

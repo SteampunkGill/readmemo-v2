@@ -1,0 +1,30 @@
+server:
+  port: 8080
+spring:
+  application:
+    name: gateway-service
+  cloud:
+    nacos:
+      discovery:
+        server-addr: nacos:8848
+    gateway:
+      discovery:
+        locator:
+          enabled: true
+      routes:
+        - id: auth-route
+          uri: lb://auth-service
+          predicates:
+            - Path=/auth/**
+        - id: document-route
+          uri: lb://document-service
+          predicates:
+            - Path=/doc/**
+        - id: study-route
+          uri: lb://study-service
+          predicates:
+            - Path=/study/**
+        - id: user-route
+          uri: lb://user-service
+          predicates:
+            - Path=/user/**

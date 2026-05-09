@@ -1,0 +1,11 @@
+server:
+  port: 8081
+spring:
+  application:
+    name: auth-service
+  cloud:
+    nacos:
+      discovery:
+        server-addr: nacos:8848
+custom:
+  config: "auth-service config"

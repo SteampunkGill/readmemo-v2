@@ -1,0 +1,11 @@
+server:
+  port: 8083
+spring:
+  application:
+    name: study-service
+  cloud:
+    nacos:
+      discovery:
+        server-addr: nacos:8848
+custom:
+  config: "study-service config"

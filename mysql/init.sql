@@ -71,6 +71,21 @@ DROP TABLE IF EXISTS `review_settings`;
 DROP TABLE IF EXISTS `reading_settings`;
 DROP TABLE IF EXISTS `document_categories`;
 DROP TABLE IF EXISTS `users`;
+DROP TABLE IF EXISTS `undo_log`;
+
+-- Seata undo_log table
+CREATE TABLE IF NOT EXISTS `undo_log` (
+  `id` BIGINT(20) NOT NULL AUTO_INCREMENT COMMENT '自增主键',
+  `branch_id` BIGINT(20) NOT NULL COMMENT '分支事务ID',
+  `xid` VARCHAR(128) NOT NULL COMMENT '全局事务ID',
+  `context` VARCHAR(128) NOT NULL COMMENT '上下文信息',
+  `rollback_info` LONGBLOB NOT NULL COMMENT '回滚信息',
+  `log_status` INT(11) NOT NULL COMMENT '状态: 0-正常, 1-全局事务已提交, 2-全局事务已回滚',
+  `log_created` DATETIME(6) NOT NULL COMMENT '创建时间',
+  `log_modified` DATETIME(6) NOT NULL COMMENT '修改时间',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `ux_undo_log` (`xid`, `branch_id`)
+) ENGINE=InnoDB AUTO_INCREMENT=1 DEFAULT CHARSET=utf8mb4 COMMENT='分布式事务回滚日志表';
 
 -- Table structure for `users`
 CREATE TABLE `users` (
